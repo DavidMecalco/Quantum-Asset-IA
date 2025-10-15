@@ -2,7 +2,8 @@
 
 <div align="center">
 
-![Quantum Asset](https://via.placeholder.com/800x200/667eea/ffffff?text=Quantum+Asset+-+Maximo+Integration+Portal)
+<img width="5152" height="2620" alt="_C__Users_Dreiv_Downloads_index html (1)" src="https://github.com/user-attachments/assets/aad66b45-5a28-4b12-a78e-d61c600b1d1f" />
+
 
 **Portal completo para integración de datos, análisis avanzado y asistente de IA conversacional con IBM Maximo**
 
@@ -318,7 +319,7 @@ Este proyecto está bajo la Licencia MIT. Ver [LICENSE](LICENSE) para más detal
 
 ## 📞 Contacto y Soporte
 
-- **Desarrollador**: [Tu Nombre](mailto:tu@email.com)
+- **Desarrollador**: [David Mecalco](mailto:davidmecalcodeveloper@gmail.com)
 - **Proyecto**: [GitHub Repository](https://github.com/tu-usuario/quantum-asset)
 - **Documentación**: [Wiki del Proyecto](https://github.com/tu-usuario/quantum-asset/wiki)
 
