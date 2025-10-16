@@ -1,8 +1,9 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, memo } from 'react';
 import { Clock, Calendar, Activity, TrendingUp, User } from 'lucide-react';
 import { useAuthStore } from '../../stores/authStore';
 import { WidgetContainer } from '../layout/WidgetContainer';
 import { WidgetProps, WidgetType } from '../../types/widgets';
+import { useStableCallback, memoizeFunction } from '../../utils/memoization';
 
 // Props específicas para WelcomeWidget
 interface WelcomeWidgetProps extends WidgetProps {
@@ -11,18 +12,18 @@ interface WelcomeWidgetProps extends WidgetProps {
   showQuickStats?: boolean;
 }
 
-// Función para obtener saludo según la hora
-const getGreeting = (): string => {
+// Memoized function for getting greeting based on hour
+const getGreeting = memoizeFunction((): string => {
   const hour = new Date().getHours();
   
   if (hour >= 5 && hour < 12) return 'Buenos días';
   if (hour >= 12 && hour < 18) return 'Buenas tardes';
   if (hour >= 18 && hour < 22) return 'Buenas noches';
   return 'Buenas madrugadas';
-};
+}, () => Math.floor(Date.now() / (1000 * 60 * 60)).toString()); // Cache per hour
 
-// Función para formatear fecha de último login
-const formatLastLogin = (date: Date): string => {
+// Memoized function for formatting last login date
+const formatLastLogin = memoizeFunction((date: Date): string => {
   const now = new Date();
   const diffInHours = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60));
   
@@ -39,22 +40,22 @@ const formatLastLogin = (date: Date): string => {
     month: 'short',
     year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined
   });
-};
+}, (date: Date) => `${date.getTime()}-${Math.floor(Date.now() / (1000 * 60 * 60))}`);
 
-// Función para obtener el día de la semana
-const getCurrentDay = (): string => {
+// Memoized function for getting current day
+const getCurrentDay = memoizeFunction((): string => {
   const days = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
   return days[new Date().getDay()];
-};
+}, () => new Date().toDateString()); // Cache per day
 
-// Componente de estadísticas rápidas
-const QuickStats: React.FC = () => {
-  // Datos simulados - en producción vendrían de APIs
+// Memoized component for quick stats
+const QuickStats: React.FC = memo(() => {
+  // Expensive calculation memoized with daily cache
   const stats = useMemo(() => ({
     tasksCompleted: Math.floor(Math.random() * 15) + 5,
     hoursWorked: Math.floor(Math.random() * 6) + 2,
     efficiency: Math.floor(Math.random() * 20) + 80
-  }), []);
+  }), [new Date().toDateString()]); // Recalculate daily
 
   return (
     <div className="grid grid-cols-3 gap-3 mt-4">
@@ -83,11 +84,13 @@ const QuickStats: React.FC = () => {
       </div>
     </div>
   );
-};
+});
 
-// Componente de actividad reciente
-const RecentActivity: React.FC = () => {
-  // Actividades simuladas - en producción vendrían de APIs
+QuickStats.displayName = 'QuickStats';
+
+// Memoized component for recent activity
+const RecentActivity: React.FC = memo(() => {
+  // Memoized activities data - in production would come from APIs
   const activities = useMemo(() => [
     {
       id: 1,
@@ -113,7 +116,7 @@ const RecentActivity: React.FC = () => {
       icon: TrendingUp,
       color: 'text-purple-400'
     }
-  ], []);
+  ], [new Date().toDateString()]); // Recalculate daily
 
   return (
     <div className="mt-4 space-y-2">
@@ -136,10 +139,12 @@ const RecentActivity: React.FC = () => {
       })}
     </div>
   );
-};
+});
 
-// Componente principal WelcomeWidget
-export const WelcomeWidget: React.FC<WelcomeWidgetProps> = ({
+RecentActivity.displayName = 'RecentActivity';
+
+// Memoized main WelcomeWidget component
+export const WelcomeWidget: React.FC<WelcomeWidgetProps> = memo(({
   id,
   size,
   isLoading = false,
@@ -154,8 +159,8 @@ export const WelcomeWidget: React.FC<WelcomeWidgetProps> = ({
 }) => {
   const { user } = useAuthStore();
 
-  // Crear widget state para el container
-  const widgetState = {
+  // Memoized widget state for container
+  const widgetState = useMemo(() => ({
     id,
     type: WidgetType.WELCOME,
     size,
@@ -164,17 +169,50 @@ export const WelcomeWidget: React.FC<WelcomeWidgetProps> = ({
     isLoading,
     error,
     settings: {}
-  };
+  }), [id, size, isLoading, error]);
 
-  if (!user) {
+  // Memoized user data calculations
+  const userInfo = useMemo(() => {
+    if (!user) return null;
+    
+    return {
+      firstName: user.firstName,
+      fullName: `${user.firstName} ${user.lastName}`,
+      initials: `${user.firstName[0]}${user.lastName[0]}`,
+      role: user.role,
+      lastLogin: user.lastLogin
+    };
+  }, [user?.firstName, user?.lastName, user?.role, user?.lastLogin]);
+
+  // Memoized time-based data
+  const timeInfo = useMemo(() => ({
+    greeting: getGreeting(),
+    currentDay: getCurrentDay(),
+    currentDate: new Date().toLocaleDateString('es-ES')
+  }), [Math.floor(Date.now() / (1000 * 60 * 60))]); // Update hourly
+
+  // Stable callbacks
+  const handleRefresh = useStableCallback(() => {
+    onRefresh?.();
+  }, [onRefresh]);
+
+  const handleResize = useStableCallback((newSize: any) => {
+    onResize?.(newSize);
+  }, [onResize]);
+
+  const handleRemove = useStableCallback(() => {
+    onRemove?.();
+  }, [onRemove]);
+
+  if (!userInfo) {
     return (
       <WidgetContainer
         widget={widgetState}
         title="Bienvenida"
         icon={<User className="w-4 h-4" />}
-        onRefresh={onRefresh}
-        onResize={onResize}
-        onRemove={onRemove}
+        onRefresh={handleRefresh}
+        onResize={handleResize}
+        onRemove={handleRemove}
         className={className}
       >
         <div className="flex items-center justify-center h-full text-glass-400">
@@ -184,27 +222,22 @@ export const WelcomeWidget: React.FC<WelcomeWidgetProps> = ({
     );
   }
 
-  const greeting = getGreeting();
-  const currentDay = getCurrentDay();
-  const firstName = user.firstName;
-  const fullName = `${user.firstName} ${user.lastName}`;
-
   return (
     <WidgetContainer
       widget={widgetState}
       title="Bienvenida"
-      subtitle={`${currentDay}, ${new Date().toLocaleDateString('es-ES')}`}
+      subtitle={`${timeInfo.currentDay}, ${timeInfo.currentDate}`}
       icon={<User className="w-4 h-4" />}
-      onRefresh={onRefresh}
-      onResize={onResize}
-      onRemove={onRemove}
+      onRefresh={handleRefresh}
+      onResize={handleResize}
+      onRemove={handleRemove}
       className={className}
     >
       <div className="h-full flex flex-col">
         {/* Saludo principal */}
         <div className="text-center mb-4">
           <h2 className="text-2xl font-bold text-white mb-1">
-            {greeting}, {firstName}! 👋
+            {timeInfo.greeting}, {userInfo.firstName}! 👋
           </h2>
           <p className="text-glass-300 text-sm">
             Bienvenido de vuelta a Quantum Asset IA
@@ -216,17 +249,17 @@ export const WelcomeWidget: React.FC<WelcomeWidgetProps> = ({
           <div className="flex items-center space-x-3">
             {/* Avatar */}
             <div className="w-12 h-12 bg-gradient-to-br from-quantum-blue to-quantum-purple rounded-full flex items-center justify-center text-white font-medium">
-              {user.firstName[0]}{user.lastName[0]}
+              {userInfo.initials}
             </div>
             
             {/* Información */}
             <div className="flex-1">
-              <p className="text-white font-medium">{fullName}</p>
-              <p className="text-glass-300 text-sm capitalize">{user.role}</p>
-              {showLastLogin && user.lastLogin && (
+              <p className="text-white font-medium">{userInfo.fullName}</p>
+              <p className="text-glass-300 text-sm capitalize">{userInfo.role}</p>
+              {showLastLogin && userInfo.lastLogin && (
                 <p className="text-glass-400 text-xs flex items-center mt-1">
                   <Calendar className="w-3 h-3 mr-1" />
-                  Último acceso: {formatLastLogin(new Date(user.lastLogin))}
+                  Último acceso: {formatLastLogin(new Date(userInfo.lastLogin))}
                 </p>
               )}
             </div>
@@ -258,6 +291,8 @@ export const WelcomeWidget: React.FC<WelcomeWidgetProps> = ({
       </div>
     </WidgetContainer>
   );
-};
+});
+
+WelcomeWidget.displayName = 'WelcomeWidget';
 
 export default WelcomeWidget;

@@ -1,5 +1,12 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, memo, useRef } from 'react';
 import { WidgetState, WidgetSize, GridConfig } from '../../types/widgets';
+import { useStableCallback, useThrottle } from '../../utils/memoization';
+import { 
+  useTouchGestures, 
+  isTouchDevice, 
+  getTouchOptimizedButtonSize,
+  SwipeGesture 
+} from '../../utils/touchGestures';
 
 // Props para el DashboardGrid
 interface DashboardGridProps {
@@ -13,6 +20,10 @@ interface DashboardGridProps {
   isDraggable?: boolean;
   isResizable?: boolean;
   enableDropZone?: boolean;
+  id?: string;
+  role?: string;
+  'aria-label'?: string;
+  tabIndex?: number;
 }
 
 // Props para items individuales del grid
@@ -27,8 +38,8 @@ interface GridItemProps {
   className?: string;
 }
 
-// Componente para items individuales del grid
-const GridItem: React.FC<GridItemProps> = ({
+// Memoized component for individual grid items
+const GridItem: React.FC<GridItemProps> = memo(({
   widget,
   isDraggable,
   isResizable,
@@ -39,10 +50,13 @@ const GridItem: React.FC<GridItemProps> = ({
   className = ''
 }) => {
   const [isDragging, setIsDragging] = useState(false);
+  const [isTouchDragging, setIsTouchDragging] = useState(false);
+  const itemRef = useRef<HTMLDivElement>(null);
+  const isTouch = isTouchDevice();
 
-  // Mapear tamaños de widget a clases CSS
-  const getSizeClasses = (size: WidgetSize): string => {
-    switch (size) {
+  // Memoized size classes mapping
+  const sizeClasses = useMemo(() => {
+    switch (widget.size) {
       case WidgetSize.SMALL:
         return 'col-span-1 row-span-2';
       case WidgetSize.MEDIUM:
@@ -52,10 +66,10 @@ const GridItem: React.FC<GridItemProps> = ({
       default:
         return 'col-span-2 row-span-2';
     }
-  };
+  }, [widget.size]);
 
-  // Manejar inicio de drag
-  const handleDragStart = useCallback((event: React.DragEvent) => {
+  // Stable callbacks for drag operations
+  const handleDragStart = useStableCallback((event: React.DragEvent) => {
     if (!isDraggable) return;
     
     setIsDragging(true);
@@ -68,8 +82,7 @@ const GridItem: React.FC<GridItemProps> = ({
     onDragStart?.(widget.id, event);
   }, [isDraggable, widget.id, onDragStart]);
 
-  // Manejar fin de drag
-  const handleDragEnd = useCallback((event: React.DragEvent) => {
+  const handleDragEnd = useStableCallback((event: React.DragEvent) => {
     setIsDragging(false);
     
     // Remover clases visuales
@@ -78,26 +91,74 @@ const GridItem: React.FC<GridItemProps> = ({
     onDragEnd?.(widget.id, event);
   }, [widget.id, onDragEnd]);
 
-  // Manejar cambio de tamaño
-  const handleSizeChange = useCallback((newSize: WidgetSize) => {
+  const handleSizeChange = useStableCallback((newSize: WidgetSize) => {
     if (!isResizable) return;
     onResize?.(widget.id, newSize);
   }, [isResizable, widget.id, onResize]);
 
-  const baseClasses = `
+  // Configurar gestos táctiles
+  const gestureHandler = useTouchGestures(itemRef, {
+    swipeThreshold: 30,
+    longPressDelay: 300,
+    preventScroll: isDraggable
+  });
+
+  // Manejar gestos táctiles
+  useEffect(() => {
+    if (!gestureHandler || !isDraggable) return;
+
+    // Long press para iniciar drag en móvil
+    gestureHandler.onLongPressGesture(() => {
+      setIsTouchDragging(true);
+      // Simular evento de drag start
+      const fakeEvent = new DragEvent('dragstart');
+      onDragStart?.(widget.id, fakeEvent as any);
+    });
+
+    // Swipe para cambiar tamaño en móvil
+    gestureHandler.onSwipeGesture((gesture: SwipeGesture) => {
+      if (!isResizable) return;
+      
+      if (gesture.direction === 'up' && widget.size !== WidgetSize.LARGE) {
+        const sizes = [WidgetSize.SMALL, WidgetSize.MEDIUM, WidgetSize.LARGE];
+        const currentIndex = sizes.indexOf(widget.size);
+        onResize?.(widget.id, sizes[currentIndex + 1]);
+      } else if (gesture.direction === 'down' && widget.size !== WidgetSize.SMALL) {
+        const sizes = [WidgetSize.SMALL, WidgetSize.MEDIUM, WidgetSize.LARGE];
+        const currentIndex = sizes.indexOf(widget.size);
+        onResize?.(widget.id, sizes[currentIndex - 1]);
+      }
+    });
+
+    // Double tap para cambiar tamaño
+    gestureHandler.onDoubleTapGesture(() => {
+      if (isResizable) {
+        const sizes = [WidgetSize.SMALL, WidgetSize.MEDIUM, WidgetSize.LARGE];
+        const currentIndex = sizes.indexOf(widget.size);
+        const nextIndex = (currentIndex + 1) % sizes.length;
+        onResize?.(widget.id, sizes[nextIndex]);
+      }
+    });
+
+  }, [gestureHandler, isDraggable, isResizable, widget.id, widget.size, onDragStart, onResize, handleSizeChange]);
+
+  // Memoized base classes
+  const baseClasses = useMemo(() => `
     relative bg-glass-50 backdrop-blur-md rounded-2xl border border-glass-100
     transition-all duration-300 ease-in-out
     hover:bg-glass-100 hover:border-glass-200
-    ${getSizeClasses(widget.size)}
-    ${isDragging ? 'z-50' : 'z-10'}
-    ${isDraggable ? 'cursor-move' : ''}
+    ${sizeClasses}
+    ${isDragging || isTouchDragging ? 'z-50' : 'z-10'}
+    ${isDraggable ? (isTouch ? 'cursor-grab active:cursor-grabbing' : 'cursor-move') : ''}
+    ${isTouchDragging ? 'opacity-75 scale-105 shadow-2xl' : ''}
     ${className}
-  `;
+  `, [sizeClasses, isDragging, isTouchDragging, isDraggable, isTouch, className]);
 
   return (
     <div
+      ref={itemRef}
       className={baseClasses}
-      draggable={isDraggable}
+      draggable={isDraggable && !isTouch}
       onDragStart={handleDragStart}
       onDragEnd={handleDragEnd}
       data-widget-id={widget.id}
@@ -105,47 +166,66 @@ const GridItem: React.FC<GridItemProps> = ({
     >
       {/* Handle de drag (visible solo en hover si es draggable) */}
       {isDraggable && (
-        <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-          <div className="w-6 h-6 flex items-center justify-center text-glass-300 hover:text-white cursor-move">
+        <div className={`absolute top-2 right-2 transition-opacity duration-200 ${
+          isTouch ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+        }`}>
+          <div className={`flex items-center justify-center text-glass-300 hover:text-white ${
+            isTouch ? 'w-8 h-8 bg-glass-200 rounded-lg' : 'w-6 h-6 cursor-move'
+          }`}>
             <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
               <path d="M7 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM7 8a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM7 14a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM13 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM13 8a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM13 14a2 2 0 1 0 0 4 2 2 0 0 0 0-4z" />
             </svg>
           </div>
+          {isTouch && (
+            <div className="absolute -bottom-6 left-1/2 transform -translate-x-1/2 text-xs text-glass-400 whitespace-nowrap">
+              Mantén presionado
+            </div>
+          )}
         </div>
       )}
 
       {/* Controles de resize (visible solo en hover si es resizable) */}
       {isResizable && (
-        <div className="absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-          <div className="flex space-x-1">
+        <div className={`absolute bottom-2 right-2 transition-opacity duration-200 ${
+          isTouch ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+        }`}>
+          <div className={`flex ${isTouch ? 'flex-col space-y-1' : 'space-x-1'}`}>
             <button
               onClick={() => handleSizeChange(WidgetSize.SMALL)}
-              className={`w-3 h-3 rounded-full border-2 transition-colors duration-200 ${
+              className={`${isTouch ? 'w-6 h-6' : 'w-3 h-3'} rounded-full border-2 transition-colors duration-200 ${
                 widget.size === WidgetSize.SMALL 
                   ? 'bg-quantum-blue border-quantum-blue' 
                   : 'border-glass-300 hover:border-white'
               }`}
               title="Pequeño"
+              style={{ minWidth: isTouch ? getTouchOptimizedButtonSize(24) : undefined }}
             />
             <button
               onClick={() => handleSizeChange(WidgetSize.MEDIUM)}
-              className={`w-3 h-3 rounded-full border-2 transition-colors duration-200 ${
+              className={`${isTouch ? 'w-6 h-6' : 'w-3 h-3'} rounded-full border-2 transition-colors duration-200 ${
                 widget.size === WidgetSize.MEDIUM 
                   ? 'bg-quantum-purple border-quantum-purple' 
                   : 'border-glass-300 hover:border-white'
               }`}
               title="Mediano"
+              style={{ minWidth: isTouch ? getTouchOptimizedButtonSize(24) : undefined }}
             />
             <button
               onClick={() => handleSizeChange(WidgetSize.LARGE)}
-              className={`w-3 h-3 rounded-full border-2 transition-colors duration-200 ${
+              className={`${isTouch ? 'w-6 h-6' : 'w-3 h-3'} rounded-full border-2 transition-colors duration-200 ${
                 widget.size === WidgetSize.LARGE 
                   ? 'bg-quantum-indigo border-quantum-indigo' 
                   : 'border-glass-300 hover:border-white'
               }`}
               title="Grande"
+              style={{ minWidth: isTouch ? getTouchOptimizedButtonSize(24) : undefined }}
             />
           </div>
+          {isTouch && (
+            <div className="absolute -left-16 top-1/2 transform -translate-y-1/2 text-xs text-glass-400 whitespace-nowrap">
+              Doble toque o desliza
+            </div>
+          )}
         </div>
       )}
 
@@ -175,10 +255,12 @@ const GridItem: React.FC<GridItemProps> = ({
       )}
     </div>
   );
-};
+});
 
-// Componente principal DashboardGrid
-export const DashboardGrid: React.FC<DashboardGridProps> = ({
+GridItem.displayName = 'GridItem';
+
+// Memoized main DashboardGrid component
+export const DashboardGrid = React.forwardRef<HTMLDivElement, DashboardGridProps>(({
   widgets,
   gridConfig,
   onLayoutChange,
@@ -188,26 +270,32 @@ export const DashboardGrid: React.FC<DashboardGridProps> = ({
   children,
   isDraggable = true,
   isResizable = true,
-  enableDropZone = true
-}) => {
+  enableDropZone = true,
+  id,
+  role,
+  'aria-label': ariaLabel,
+  tabIndex
+}, ref) => {
   const [draggedWidget, setDraggedWidget] = useState<string | null>(null);
   const [dropZoneActive, setDropZoneActive] = useState(false);
   const [currentBreakpoint, setCurrentBreakpoint] = useState('lg');
+  const [currentPage, setCurrentPage] = useState(0);
+  const isTouch = isTouchDevice();
 
-  // Detectar breakpoint actual basado en el ancho de la ventana
+  // Throttle window resize events for better performance
+  const throttledWindowWidth = useThrottle(
+    typeof window !== 'undefined' ? window.innerWidth : 1024, 
+    100
+  );
+
+  // Detect current breakpoint based on throttled window width
   useEffect(() => {
-    const updateBreakpoint = () => {
-      const width = window.innerWidth;
-      if (width >= 1024) setCurrentBreakpoint('lg');
-      else if (width >= 768) setCurrentBreakpoint('md');
-      else if (width >= 640) setCurrentBreakpoint('sm');
-      else setCurrentBreakpoint('xs');
-    };
-
-    updateBreakpoint();
-    window.addEventListener('resize', updateBreakpoint);
-    return () => window.removeEventListener('resize', updateBreakpoint);
-  }, []);
+    const width = throttledWindowWidth;
+    if (width >= 1024) setCurrentBreakpoint('lg');
+    else if (width >= 768) setCurrentBreakpoint('md');
+    else if (width >= 640) setCurrentBreakpoint('sm');
+    else setCurrentBreakpoint('xs');
+  }, [throttledWindowWidth]);
 
   // Obtener configuración del breakpoint actual
   const currentGridConfig = useMemo(() => {
@@ -227,19 +315,17 @@ export const DashboardGrid: React.FC<DashboardGridProps> = ({
     `;
   }, [currentGridConfig, gridConfig.rowHeight, className]);
 
-  // Manejar inicio de drag
-  const handleDragStart = useCallback((widgetId: string, _event: React.DragEvent) => {
+  // Stable callbacks for drag operations
+  const handleDragStart = useStableCallback((widgetId: string, _event: React.DragEvent) => {
     setDraggedWidget(widgetId);
   }, []);
 
-  // Manejar fin de drag
-  const handleDragEnd = useCallback((_widgetId: string, _event: React.DragEvent) => {
+  const handleDragEnd = useStableCallback((_widgetId: string, _event: React.DragEvent) => {
     setDraggedWidget(null);
     setDropZoneActive(false);
   }, []);
 
-  // Manejar drag over en el grid
-  const handleDragOver = useCallback((event: React.DragEvent) => {
+  const handleDragOver = useStableCallback((event: React.DragEvent) => {
     if (!enableDropZone) return;
     
     event.preventDefault();
@@ -247,16 +333,15 @@ export const DashboardGrid: React.FC<DashboardGridProps> = ({
     setDropZoneActive(true);
   }, [enableDropZone]);
 
-  // Manejar drag leave del grid
-  const handleDragLeave = useCallback((event: React.DragEvent) => {
+  const handleDragLeave = useStableCallback((event: React.DragEvent) => {
     // Solo desactivar si realmente salimos del grid
     if (!event.currentTarget.contains(event.relatedTarget as Node)) {
       setDropZoneActive(false);
     }
   }, []);
 
-  // Manejar drop en el grid
-  const handleDrop = useCallback((event: React.DragEvent) => {
+  // Stable callback for drop operations
+  const handleDrop = useStableCallback((event: React.DragEvent) => {
     event.preventDefault();
     setDropZoneActive(false);
     
@@ -298,8 +383,8 @@ export const DashboardGrid: React.FC<DashboardGridProps> = ({
     setDraggedWidget(null);
   }, [draggedWidget, widgets, currentGridConfig, gridConfig.rowHeight, onLayoutChange, onWidgetMove]);
 
-  // Manejar resize de widget
-  const handleWidgetResize = useCallback((widgetId: string, size: WidgetSize) => {
+  // Stable callback for widget resize
+  const handleWidgetResize = useStableCallback((widgetId: string, size: WidgetSize) => {
     if (!onWidgetResize || !onLayoutChange) return;
 
     onWidgetResize(widgetId, size);
@@ -311,19 +396,117 @@ export const DashboardGrid: React.FC<DashboardGridProps> = ({
     onLayoutChange(updatedWidgets);
   }, [widgets, onWidgetResize, onLayoutChange]);
 
-  // Renderizar widgets habilitados
-  const enabledWidgets = widgets.filter(widget => widget.isEnabled);
+  // Memoized enabled widgets
+  const enabledWidgets = useMemo(() => 
+    widgets.filter(widget => widget.isEnabled), 
+    [widgets]
+  );
+
+  // Configurar gestos táctiles para el grid
+  const gridGestureHandler = useTouchGestures(ref as React.RefObject<HTMLElement>, {
+    swipeThreshold: 50,
+    swipeVelocityThreshold: 0.5
+  });
+
+  // Paginación para móviles (mostrar menos widgets por página)
+  const widgetsPerPage = useMemo(() => {
+    if (!isTouch) return enabledWidgets.length;
+    
+    switch (currentBreakpoint) {
+      case 'xs':
+      case 'sm':
+        return 2; // 2 widgets por página en móvil
+      case 'md':
+        return 4; // 4 widgets por página en tablet
+      default:
+        return enabledWidgets.length; // Todos en desktop
+    }
+  }, [isTouch, currentBreakpoint, enabledWidgets.length]);
+
+  const totalPages = Math.ceil(enabledWidgets.length / widgetsPerPage);
+  const currentWidgets = useMemo(() => {
+    if (!isTouch || widgetsPerPage >= enabledWidgets.length) {
+      return enabledWidgets;
+    }
+    
+    const startIndex = currentPage * widgetsPerPage;
+    return enabledWidgets.slice(startIndex, startIndex + widgetsPerPage);
+  }, [enabledWidgets, currentPage, widgetsPerPage, isTouch]);
+
+  // Manejar navegación por swipe en móviles
+  useEffect(() => {
+    if (!gridGestureHandler || !isTouch || totalPages <= 1) return;
+
+    gridGestureHandler.onSwipeGesture((gesture: SwipeGesture) => {
+      if (gesture.direction === 'left' && currentPage < totalPages - 1) {
+        setCurrentPage(prev => prev + 1);
+      } else if (gesture.direction === 'right' && currentPage > 0) {
+        setCurrentPage(prev => prev - 1);
+      }
+    });
+  }, [gridGestureHandler, isTouch, totalPages, currentPage]);
 
   return (
     <div className="w-full h-full relative">
+      {/* Indicador de página para móviles */}
+      {isTouch && totalPages > 1 && (
+        <div className="flex justify-center items-center mb-4 space-x-2">
+          <button
+            onClick={() => setCurrentPage(prev => Math.max(0, prev - 1))}
+            disabled={currentPage === 0}
+            className="p-2 rounded-lg bg-glass-100 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ minWidth: getTouchOptimizedButtonSize(40), minHeight: getTouchOptimizedButtonSize(40) }}
+          >
+            ←
+          </button>
+          
+          <div className="flex space-x-1">
+            {Array.from({ length: totalPages }, (_, i) => (
+              <button
+                key={i}
+                onClick={() => setCurrentPage(i)}
+                className={`w-2 h-2 rounded-full transition-colors ${
+                  i === currentPage ? 'bg-quantum-blue' : 'bg-glass-300'
+                }`}
+              />
+            ))}
+          </div>
+          
+          <button
+            onClick={() => setCurrentPage(prev => Math.min(totalPages - 1, prev + 1))}
+            disabled={currentPage === totalPages - 1}
+            className="p-2 rounded-lg bg-glass-100 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{ minWidth: getTouchOptimizedButtonSize(40), minHeight: getTouchOptimizedButtonSize(40) }}
+          >
+            →
+          </button>
+        </div>
+      )}
+
+      {/* Instrucciones para móviles */}
+      {isTouch && totalPages > 1 && (
+        <div className="text-center mb-4">
+          <p className="text-glass-300 text-sm">
+            Desliza horizontalmente para navegar entre páginas
+          </p>
+        </div>
+      )}
+
       {/* Grid principal */}
       <div
-        className={`${gridClasses} ${dropZoneActive ? 'bg-quantum-blue/10 border-2 border-dashed border-quantum-blue/50 rounded-lg' : ''}`}
+        ref={ref}
+        id={id}
+        role={role}
+        aria-label={ariaLabel}
+        tabIndex={tabIndex}
+        className={`${gridClasses} ${dropZoneActive ? 'bg-quantum-blue/10 border-2 border-dashed border-quantum-blue/50 rounded-lg' : ''} ${
+          isTouch ? 'touch-pan-x' : ''
+        }`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
-        {enabledWidgets.map((widget) => (
+        {currentWidgets.map((widget) => (
           <GridItem
             key={widget.id}
             widget={widget}
@@ -362,6 +545,8 @@ export const DashboardGrid: React.FC<DashboardGridProps> = ({
       )}
     </div>
   );
-};
+});
+
+DashboardGrid.displayName = 'DashboardGrid';
 
 export default DashboardGrid;

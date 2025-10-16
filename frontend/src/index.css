@@ -1,9 +1,12 @@
+/* Import custom animations */
+@import './styles/animations.css';
+
+/* Import accessibility styles */
+@import './styles/accessibility.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-/* Import custom animations */
-@import './styles/animations.css';
 
 @layer base {
   :root {

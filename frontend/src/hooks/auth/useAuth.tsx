@@ -31,7 +31,7 @@ export const useAuth = (): UseAuthReturn => {
       await storeLogin(credentials);
       
       // Redirección después del login exitoso
-      const from = (location.state as any)?.from?.pathname || '/dashboard';
+      const from = (location.state as any)?.from?.pathname || '/home';
       navigate(from, { replace: true });
     } catch (error) {
       // El error ya está manejado en el store, solo lo re-lanzamos
@@ -63,9 +63,9 @@ export const useAuth = (): UseAuthReturn => {
       });
     }
     
-    // Si está autenticado y está en la página de login, redirigir al dashboard
+    // Si está autenticado y está en la página de login, redirigir al home
     if (isAuthenticated && isLoginPage) {
-      navigate('/dashboard', { replace: true });
+      navigate('/home', { replace: true });
     }
   }, [isAuthenticated, isLoading, location, navigate]);
 
@@ -112,11 +112,11 @@ export const useAuthRedirect = () => {
   };
 
   const redirectToDashboard = () => {
-    navigate('/dashboard', { replace: true });
+    navigate('/home', { replace: true });
   };
 
   const redirectAfterLogin = () => {
-    const from = (location.state as any)?.from?.pathname || '/dashboard';
+    const from = (location.state as any)?.from?.pathname || '/home';
     navigate(from, { replace: true });
   };
 

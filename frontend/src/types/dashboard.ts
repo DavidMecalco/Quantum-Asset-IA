@@ -2,6 +2,7 @@
  * Tipos para el sistema de dashboard
  */
 import { Notification } from './notifications';
+import { WidgetSize } from './widgets';
 
 // Enums para estados y prioridades
 export enum TaskPriority {
@@ -81,8 +82,7 @@ export interface DashboardConfig {
   compactMode?: boolean;
 }
 
-// Tipos para widgets
-export type WidgetSize = 'small' | 'medium' | 'large';
+// WidgetSize is imported from widgets.ts to avoid conflicts
 
 export interface WidgetPosition {
   x: number;

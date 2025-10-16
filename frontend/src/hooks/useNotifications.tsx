@@ -62,7 +62,7 @@ export const useNotifications = (filters?: NotificationFilters, options?: {
   // Query para estadísticas
   const statsQuery = useQuery({
     queryKey: NOTIFICATION_QUERY_KEYS.stats(),
-    queryFn: () => notificationService.getStats(),
+    queryFn: () => notificationService.getNotificationStats(),
     enabled,
     staleTime: 60 * 1000, // 1 minuto
     gcTime: 10 * 60 * 1000, // 10 minutos
@@ -118,7 +118,8 @@ export const useNotifications = (filters?: NotificationFilters, options?: {
 
   // Combinar notificaciones de query y tiempo real
   const notifications = useMemo(() => {
-    const queryNotifications = notificationsQuery.data || [];
+    const queryData = notificationsQuery.data;
+    const queryNotifications = queryData?.notifications || [];
     
     // Si tenemos notificaciones en tiempo real, usarlas como fuente principal
     if (realtimeNotifications.length > 0) {
@@ -198,42 +199,55 @@ export const useNotificationMutations = () => {
     }
   });
 
-  // Marcar todas como leídas
-  const markAllAsReadMutation = useMutation({
-    mutationFn: () => notificationService.markAllAsRead(),
+  // Marcar múltiples como leídas (implementaremos markAllAsRead usando esta función)
+  const markMultipleAsReadMutation = useMutation({
+    mutationFn: (notificationIds: string[]) => notificationService.markMultipleAsRead(notificationIds),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: NOTIFICATION_QUERY_KEYS.all });
     },
     onError: (error: any) => {
-      console.error('Failed to mark all notifications as read:', error);
+      console.error('Failed to mark multiple notifications as read:', error);
     }
   });
 
-  // Eliminar notificación
-  const deleteNotificationMutation = useMutation({
-    mutationFn: (notificationId: string) => notificationService.deleteNotification(notificationId),
+  // Nota: No hay método deleteNotification en el servicio, usamos archiveNotification
+
+  // Archivar notificación
+  const archiveNotificationMutation = useMutation({
+    mutationFn: (notificationId: string) => notificationService.archiveNotification(notificationId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: NOTIFICATION_QUERY_KEYS.all });
     },
     onError: (error: any) => {
-      console.error('Failed to delete notification:', error);
+      console.error('Failed to archive notification:', error);
     }
   });
+
+  // Helper para marcar todas como leídas
+  const markAllAsRead = useCallback((notifications: Notification[]) => {
+    const unreadIds = notifications
+      .filter(n => n.status === NotificationStatus.UNREAD)
+      .map(n => n.id);
+    
+    if (unreadIds.length > 0) {
+      markMultipleAsReadMutation.mutate(unreadIds);
+    }
+  }, [markMultipleAsReadMutation]);
 
   return {
     markAsRead: markAsReadMutation.mutate,
-    markAllAsRead: markAllAsReadMutation.mutate,
-    deleteNotification: deleteNotificationMutation.mutate,
+    markAllAsRead,
+    archiveNotification: archiveNotificationMutation.mutate,
     
     // Estados de carga
     isMarkingAsRead: markAsReadMutation.isPending,
-    isMarkingAllAsRead: markAllAsReadMutation.isPending,
-    isDeletingNotification: deleteNotificationMutation.isPending,
+    isMarkingAllAsRead: markMultipleAsReadMutation.isPending,
+    isArchivingNotification: archiveNotificationMutation.isPending,
     
     // Errores
     markAsReadError: markAsReadMutation.error,
-    markAllAsReadError: markAllAsReadMutation.error,
-    deleteNotificationError: deleteNotificationMutation.error
+    markAllAsReadError: markMultipleAsReadMutation.error,
+    archiveNotificationError: archiveNotificationMutation.error
   };
 };
 
@@ -245,7 +259,7 @@ export const useNotificationSettings = () => {
   // Query para obtener configuración
   const settingsQuery = useQuery({
     queryKey: NOTIFICATION_QUERY_KEYS.settings(),
-    queryFn: () => notificationService.getSettings(),
+    queryFn: () => notificationService.getNotificationSettings(),
     enabled: isAuthenticated,
     staleTime: 10 * 60 * 1000, // 10 minutos
     gcTime: 30 * 60 * 1000, // 30 minutos
@@ -255,7 +269,7 @@ export const useNotificationSettings = () => {
   // Mutación para guardar configuración
   const saveSettingsMutation = useMutation({
     mutationFn: (settings: Partial<NotificationSettings>) => 
-      notificationService.saveSettings(settings),
+      notificationService.updateNotificationSettings(settings),
     onSuccess: (savedSettings) => {
       queryClient.setQueryData(NOTIFICATION_QUERY_KEYS.settings(), savedSettings);
     },
@@ -331,7 +345,7 @@ export const useNotificationAnalytics = () => {
   const { notifications, stats } = useNotifications();
 
   const analytics = useMemo(() => {
-    if (!notifications || notifications.length === 0) {
+    if (!notifications || !Array.isArray(notifications) || notifications.length === 0) {
       return {
         totalCount: 0,
         unreadCount: 0,

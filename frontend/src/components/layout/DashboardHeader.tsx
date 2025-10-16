@@ -15,6 +15,11 @@ import {
 import { useAuthStore } from '../../stores/authStore';
 import { useUnreadNotifications } from '../../hooks/useNotifications';
 import { useSystemStatus } from '../../hooks/useDashboardData';
+import { 
+  isTouchDevice, 
+  getTouchOptimizedButtonSize, 
+  preventIOSZoom 
+} from '../../utils/touchGestures';
 
 // Props para el DashboardHeader
 interface DashboardHeaderProps {
@@ -35,15 +40,26 @@ const NotificationBadge: React.FC<{
 }> = ({ count, onClick }) => {
   const { formatCount } = useUnreadNotifications();
   
+  const isTouch = isTouchDevice();
+  
   return (
     <button
       onClick={onClick}
       className="relative p-2 text-glass-200 hover:text-white hover:bg-glass-200 rounded-lg transition-colors duration-200"
-      title={`${count} notificaciones no leídas`}
+      style={{ 
+        minWidth: isTouch ? getTouchOptimizedButtonSize(40) : undefined,
+        minHeight: isTouch ? getTouchOptimizedButtonSize(40) : undefined
+      }}
+      title={`${count} notificaciones no leídas (Alt+N)`}
+      data-shortcut="notifications"
+      aria-label={`${count} notificaciones no leídas. Presiona Alt+N para abrir`}
     >
       <Bell className="w-5 h-5" />
       {count > 0 && (
-        <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1">
+        <span 
+          className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1"
+          aria-label={`${count} notificaciones sin leer`}
+        >
           {formatCount(99)}
         </span>
       )}
@@ -216,6 +232,8 @@ const SearchBar: React.FC<{
 }> = ({ onSubmit, placeholder = "Buscar..." }) => {
   const [query, setQuery] = useState('');
   const [isFocused, setIsFocused] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const isTouch = isTouchDevice();
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -224,6 +242,13 @@ const SearchBar: React.FC<{
     }
   };
 
+  // Prevenir zoom en iOS
+  useEffect(() => {
+    if (inputRef.current && isTouch) {
+      preventIOSZoom(inputRef.current);
+    }
+  }, [isTouch]);
+
   return (
     <form onSubmit={handleSubmit} className="relative">
       <div className={`relative transition-all duration-200 ${
@@ -231,13 +256,22 @@ const SearchBar: React.FC<{
       }`}>
         <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-glass-400" />
         <input
+          ref={inputRef}
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}
           placeholder={placeholder}
-          className="w-full pl-10 pr-4 py-2 bg-glass-100 border border-glass-200 rounded-lg text-white placeholder-glass-400 focus:outline-none focus:ring-2 focus:ring-quantum-blue focus:border-transparent transition-all duration-200"
+          className={`w-full pl-10 pr-4 bg-glass-100 border border-glass-200 rounded-lg text-white placeholder-glass-400 focus:outline-none focus:ring-2 focus:ring-quantum-blue focus:border-transparent transition-all duration-200 ${
+            isTouch ? 'py-3 text-base' : 'py-2'
+          }`}
+          style={{ 
+            fontSize: isTouch ? '16px' : undefined,
+            minHeight: isTouch ? getTouchOptimizedButtonSize(40) : undefined
+          }}
+          data-shortcut="search"
+          aria-label="Buscar en el dashboard. Presiona Ctrl+F para enfocar"
         />
       </div>
     </form>
@@ -245,7 +279,7 @@ const SearchBar: React.FC<{
 };
 
 // Componente principal DashboardHeader
-export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
+export const DashboardHeader = React.forwardRef<HTMLElement, DashboardHeaderProps>(({
   onMenuToggle,
   onNotificationsClick,
   onSettingsClick,
@@ -254,16 +288,21 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
   showSearch = true,
   showNotifications = true,
   isMobileMenuOpen = false
-}) => {
+}, ref) => {
   const { logout } = useAuthStore();
   const { unreadCount } = useUnreadNotifications();
+  const isTouch = isTouchDevice();
 
   const handleLogout = () => {
     logout();
   };
 
   return (
-    <header className={`bg-glass-50 backdrop-blur-md border-b border-glass-100 sticky top-0 z-40 ${className}`}>
+    <header 
+      ref={ref}
+      className={`bg-glass-50 backdrop-blur-md border-b border-glass-100 sticky top-0 z-40 ${className}`}
+      role="banner"
+    >
       <div className="container mx-auto px-4 py-4">
         <div className="flex items-center justify-between">
           {/* Logo y navegación móvil */}
@@ -272,6 +311,11 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
             <button
               onClick={onMenuToggle}
               className="md:hidden p-2 text-glass-200 hover:text-white hover:bg-glass-200 rounded-lg transition-colors duration-200"
+              style={{ 
+                minWidth: isTouch ? getTouchOptimizedButtonSize(40) : undefined,
+                minHeight: isTouch ? getTouchOptimizedButtonSize(40) : undefined
+              }}
+              aria-label={isMobileMenuOpen ? 'Cerrar menú' : 'Abrir menú'}
             >
               {isMobileMenuOpen ? (
                 <X className="w-5 h-5" />
@@ -317,17 +361,26 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
 
             {/* Notificaciones */}
             {showNotifications && (
-              <NotificationBadge 
-                count={unreadCount}
-                onClick={onNotificationsClick}
-              />
+              <div id="notifications-button">
+                <NotificationBadge 
+                  count={unreadCount}
+                  onClick={onNotificationsClick}
+                />
+              </div>
             )}
 
             {/* Configuración */}
             <button
+              id="settings-button"
               onClick={onSettingsClick}
               className="p-2 text-glass-200 hover:text-white hover:bg-glass-200 rounded-lg transition-colors duration-200"
-              title="Configuración del Dashboard"
+              style={{ 
+                minWidth: isTouch ? getTouchOptimizedButtonSize(40) : undefined,
+                minHeight: isTouch ? getTouchOptimizedButtonSize(40) : undefined
+              }}
+              title="Configuración del Dashboard (Alt+S)"
+              data-shortcut="settings"
+              aria-label="Abrir configuración del dashboard"
             >
               <Settings className="w-5 h-5" />
             </button>
@@ -352,6 +405,8 @@ export const DashboardHeader: React.FC<DashboardHeaderProps> = ({
       </div>
     </header>
   );
-};
+});
+
+DashboardHeader.displayName = 'DashboardHeader';
 
 export default DashboardHeader;

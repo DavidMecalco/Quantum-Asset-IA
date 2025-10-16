@@ -64,9 +64,9 @@ export const PublicOnlyRoute: React.FC<{ children: React.ReactNode }> = ({
     return <AuthLoadingLayout />;
   }
 
-  // Si ya está autenticado, redirigir al dashboard
+  // Si ya está autenticado, redirigir al home
   if (isAuthenticated) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to="/home" replace />;
   }
 
   // Si no está autenticado, mostrar la ruta pública

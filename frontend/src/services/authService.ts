@@ -1,8 +1,9 @@
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import { LoginCredentials, AuthResponse, AuthError, AuthErrorType } from '../types/auth';
+import { authServiceMock } from './authService.mock';
 
 // Configuración base de la API
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:3001/api';
 
 // Crear instancia de Axios con configuración base
 const apiClient: AxiosInstance = axios.create({
@@ -114,12 +115,15 @@ const mapApiError = (error: any): AuthError => {
   }
 };
 
-// Servicio de autenticación
-export const authService = {
-  /**
-   * Iniciar sesión con credenciales
-   */
-  async login(credentials: LoginCredentials): Promise<AuthResponse> {
+
+
+// Determinar si usar mock o servicio real
+const isDevelopment = (import.meta as any).env?.DEV;
+const useMockAuth = isDevelopment && !(import.meta as any).env?.VITE_API_URL;
+
+// Exportar el servicio apropiado
+export const authService = useMockAuth ? authServiceMock : {
+  login: async (credentials: LoginCredentials): Promise<AuthResponse> => {
     try {
       const response = await apiClient.post<AuthResponse>('/auth/login', credentials);
       
@@ -134,9 +138,6 @@ export const authService = {
     }
   },
 
-  /**
-   * Cerrar sesión
-   */
   async logout(): Promise<void> {
     try {
       const refreshToken = localStorage.getItem('refreshToken');
@@ -144,18 +145,13 @@ export const authService = {
         await apiClient.post('/auth/logout', { refreshToken });
       }
     } catch (error) {
-      // Ignorar errores de logout en el servidor
       console.warn('Error during logout:', error);
     } finally {
-      // Siempre limpiar tokens locales
       localStorage.removeItem('accessToken');
       localStorage.removeItem('refreshToken');
     }
   },
 
-  /**
-   * Renovar token de acceso
-   */
   async refreshToken(): Promise<string> {
     try {
       const refreshToken = localStorage.getItem('refreshToken');
@@ -172,16 +168,12 @@ export const authService = {
       
       return accessToken;
     } catch (error) {
-      // Limpiar tokens si el refresh falla
       localStorage.removeItem('accessToken');
       localStorage.removeItem('refreshToken');
       throw mapApiError(error);
     }
   },
 
-  /**
-   * Solicitar recuperación de contraseña
-   */
   async forgotPassword(email: string): Promise<void> {
     try {
       await apiClient.post('/auth/forgot-password', { email });
@@ -190,15 +182,11 @@ export const authService = {
     }
   },
 
-  /**
-   * Verificar si hay un token válido almacenado
-   */
   hasValidToken(): boolean {
     const token = localStorage.getItem('accessToken');
     if (!token) return false;
 
     try {
-      // Decodificar el JWT para verificar expiración
       const payload = JSON.parse(atob(token.split('.')[1]));
       const currentTime = Date.now() / 1000;
       
@@ -208,16 +196,10 @@ export const authService = {
     }
   },
 
-  /**
-   * Obtener el token de acceso actual
-   */
   getAccessToken(): string | null {
     return localStorage.getItem('accessToken');
   },
 
-  /**
-   * Limpiar todos los tokens almacenados
-   */
   clearTokens(): void {
     localStorage.removeItem('accessToken');
     localStorage.removeItem('refreshToken');

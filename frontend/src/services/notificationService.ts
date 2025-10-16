@@ -1,20 +1,17 @@
 import { apiClient } from './authService';
 import {
   Notification,
+  NotificationEvent,
   NotificationFilters,
   NotificationResponse,
   NotificationStats,
-  NotificationEvent,
-  NotificationSettings,
   NotificationServiceConfig,
-  NotificationType,
-  NotificationPriority,
-  NotificationStatus,
-  NotificationCategory
+  NotificationSettings,
+  NotificationStatus
 } from '../types/notifications';
 
 // Configuración del servicio de notificaciones
-const DEFAULT_CONFIG: NotificationServiceConfig = {
+const NOTIFICATION_CONFIG: NotificationServiceConfig = {
   pollingInterval: 30000, // 30 segundos
   maxRetries: 3,
   retryDelay: 2000,
@@ -22,694 +19,935 @@ const DEFAULT_CONFIG: NotificationServiceConfig = {
   webSocketUrl: (import.meta as any).env?.VITE_WS_URL || 'ws://localhost:3001/ws',
   enablePersistence: true,
   maxCacheSize: 1000,
-  cacheTTL: 5 * 60 * 1000 // 5 minutos
+  cacheTTL: 300000, // 5 minutos
 };
 
-// Cache local para notificaciones
-interface NotificationCache {
-  notifications: Map<string, Notification>;
-  stats: NotificationStats | null;
-  lastFetch: Date | null;
-  unreadCount: number;
+// Tipos para eventos de WebSocket
+interface WebSocketMessage {
+  type: 'notification' | 'ping' | 'error' | 'connected';
+  data?: NotificationEvent | any;
+  timestamp: string;
 }
 
-class NotificationManager {
-  private cache: NotificationCache = {
-    notifications: new Map(),
-    stats: null,
-    lastFetch: null,
-    unreadCount: 0
-  };
+// Cache local para notificaciones
+interface CacheEntry {
+  data: any;
+  timestamp: number;
+  ttl: number;
+}
 
-  private config: NotificationServiceConfig;
-  private pollingTimer: NodeJS.Timeout | null = null;
-  private websocket: WebSocket | null = null;
-  private eventListeners: Map<string, ((event: NotificationEvent) => void)[]> = new Map();
-  private isPolling = false;
+class NotificationCache {
+  private cache = new Map<string, CacheEntry>();
+  private readonly maxSize: number;
 
-  constructor(config: Partial<NotificationServiceConfig> = {}) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
-    this.initializeEventListeners();
+  constructor(maxSize: number = NOTIFICATION_CONFIG.maxCacheSize) {
+    this.maxSize = maxSize;
   }
 
-  private initializeEventListeners(): void {
-    // Limpiar al cerrar la ventana
-    window.addEventListener('beforeunload', () => {
+  set(key: string, data: any, ttl: number = NOTIFICATION_CONFIG.cacheTTL): void {
+    // Limpiar cache si está lleno
+    if (this.cache.size >= this.maxSize) {
       this.cleanup();
-    });
+    }
 
-    // Reconectar WebSocket cuando se recupere la conexión
-    window.addEventListener('online', () => {
-      if (this.config.enableWebSocket && !this.websocket) {
-        this.connectWebSocket();
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now(),
+      ttl
+    });
+  }
+
+  get<T>(key: string): T | null {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this.cache.delete(key);
+      return null;
+    }
+
+    return entry.data as T;
+  }
+
+  has(key: string): boolean {
+    const entry = this.cache.get(key);
+    if (!entry) return false;
+    
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this.cache.delete(key);
+      return false;
+    }
+    
+    return true;
+  }
+
+  delete(key: string): void {
+    this.cache.delete(key);
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  private cleanup(): void {
+    const now = Date.now();
+    const entries = Array.from(this.cache.entries());
+    
+    // Eliminar entradas expiradas
+    entries.forEach(([key, entry]) => {
+      if (now - entry.timestamp > entry.ttl) {
+        this.cache.delete(key);
       }
     });
 
-    // Pausar polling cuando se pierde la conexión
-    window.addEventListener('offline', () => {
-      this.stopPolling();
-      this.disconnectWebSocket();
+    // Si aún está lleno, eliminar las más antiguas
+    if (this.cache.size >= this.maxSize) {
+      const sortedEntries = entries
+        .filter(([key]) => this.cache.has(key))
+        .sort((a, b) => a[1].timestamp - b[1].timestamp);
+      
+      const toDelete = sortedEntries.slice(0, Math.floor(this.maxSize * 0.2));
+      toDelete.forEach(([key]) => this.cache.delete(key));
+    }
+  }
+
+  getStats(): { size: number; keys: string[] } {
+    return {
+      size: this.cache.size,
+      keys: Array.from(this.cache.keys())
+    };
+  }
+}
+
+// Instancia del cache
+const notificationCache = new NotificationCache();
+
+// Persistencia local usando localStorage
+class NotificationPersistence {
+  private readonly storageKey = 'quantum_notifications';
+  private readonly settingsKey = 'quantum_notification_settings';
+  private readonly maxStoredNotifications = 500;
+
+  saveNotifications(notifications: Notification[]): void {
+    if (!NOTIFICATION_CONFIG.enablePersistence) return;
+
+    try {
+      // Mantener solo las notificaciones más recientes
+      const toStore = notifications
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, this.maxStoredNotifications);
+
+      localStorage.setItem(this.storageKey, JSON.stringify({
+        notifications: toStore,
+        timestamp: Date.now()
+      }));
+    } catch (error) {
+      console.warn('Error saving notifications to localStorage:', error);
+    }
+  }
+
+  loadNotifications(): Notification[] {
+    if (!NOTIFICATION_CONFIG.enablePersistence) return [];
+
+    try {
+      const stored = localStorage.getItem(this.storageKey);
+      if (!stored) return [];
+
+      const { notifications, timestamp } = JSON.parse(stored);
+      
+      // Verificar que no sean muy antiguas (máximo 24 horas)
+      if (Date.now() - timestamp > 24 * 60 * 60 * 1000) {
+        this.clearNotifications();
+        return [];
+      }
+
+      return notifications.map((n: any) => ({
+        ...n,
+        timestamp: new Date(n.timestamp)
+      }));
+    } catch (error) {
+      console.warn('Error loading notifications from localStorage:', error);
+      return [];
+    }
+  }
+
+  saveSettings(settings: NotificationSettings): void {
+    if (!NOTIFICATION_CONFIG.enablePersistence) return;
+
+    try {
+      localStorage.setItem(this.settingsKey, JSON.stringify(settings));
+    } catch (error) {
+      console.warn('Error saving notification settings:', error);
+    }
+  }
+
+  loadSettings(): NotificationSettings | null {
+    if (!NOTIFICATION_CONFIG.enablePersistence) return null;
+
+    try {
+      const stored = localStorage.getItem(this.settingsKey);
+      if (!stored) return null;
+
+      const settings = JSON.parse(stored);
+      return {
+        ...settings,
+        updatedAt: new Date(settings.updatedAt)
+      };
+    } catch (error) {
+      console.warn('Error loading notification settings:', error);
+      return null;
+    }
+  }
+
+  clearNotifications(): void {
+    localStorage.removeItem(this.storageKey);
+  }
+
+  clearSettings(): void {
+    localStorage.removeItem(this.settingsKey);
+  }
+
+  clearAll(): void {
+    this.clearNotifications();
+    this.clearSettings();
+  }
+}
+
+// Instancia de persistencia
+const persistence = new NotificationPersistence();
+
+// Clase para manejo de WebSocket
+class NotificationWebSocket {
+  private ws: WebSocket | null = null;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 1000;
+  private isConnecting = false;
+  private eventListeners: Map<string, Set<(event: NotificationEvent) => void>> = new Map();
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+
+  constructor() {
+    this.eventListeners.set('notification', new Set());
+    this.eventListeners.set('connected', new Set());
+    this.eventListeners.set('disconnected', new Set());
+    this.eventListeners.set('error', new Set());
+  }
+
+  connect(): Promise<void> {
+    if (!NOTIFICATION_CONFIG.enableWebSocket || this.isConnecting) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        this.isConnecting = true;
+        const token = localStorage.getItem('accessToken');
+        const wsUrl = `${NOTIFICATION_CONFIG.webSocketUrl}?token=${token}`;
+        
+        this.ws = new WebSocket(wsUrl);
+
+        this.ws.onopen = () => {
+          console.log('WebSocket connected for notifications');
+          this.isConnecting = false;
+          this.reconnectAttempts = 0;
+          this.startHeartbeat();
+          this.emit('connected', null);
+          resolve();
+        };
+
+        this.ws.onmessage = (event) => {
+          try {
+            const message: WebSocketMessage = JSON.parse(event.data);
+            this.handleMessage(message);
+          } catch (error) {
+            console.warn('Error parsing WebSocket message:', error);
+          }
+        };
+
+        this.ws.onclose = (event) => {
+          console.log('WebSocket disconnected:', event.code, event.reason);
+          this.isConnecting = false;
+          this.stopHeartbeat();
+          this.emit('disconnected', null);
+          
+          // Intentar reconectar si no fue un cierre intencional
+          if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.scheduleReconnect();
+          }
+        };
+
+        this.ws.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          this.isConnecting = false;
+          this.emit('error', error);
+          reject(error);
+        };
+
+        // Timeout para la conexión
+        setTimeout(() => {
+          if (this.isConnecting) {
+            this.isConnecting = false;
+            reject(new Error('WebSocket connection timeout'));
+          }
+        }, 10000);
+
+      } catch (error) {
+        this.isConnecting = false;
+        reject(error);
+      }
     });
   }
 
+  disconnect(): void {
+    if (this.ws) {
+      this.stopHeartbeat();
+      this.ws.close(1000, 'Client disconnect');
+      this.ws = null;
+    }
+  }
+
+  private handleMessage(message: WebSocketMessage): void {
+    switch (message.type) {
+      case 'notification':
+        if (message.data) {
+          this.emit('notification', message.data);
+        }
+        break;
+      case 'ping':
+        // Responder al ping del servidor
+        this.send({ type: 'pong', timestamp: new Date().toISOString() });
+        break;
+      case 'error':
+        console.error('WebSocket server error:', message.data);
+        this.emit('error', message.data);
+        break;
+    }
+  }
+
+  private send(data: any): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(data));
+    }
+  }
+
+  private startHeartbeat(): void {
+    this.heartbeatInterval = setInterval(() => {
+      this.send({ type: 'ping', timestamp: new Date().toISOString() });
+    }, 30000); // Ping cada 30 segundos
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+  }
+
+  private scheduleReconnect(): void {
+    this.reconnectAttempts++;
+    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    
+    console.log(`Scheduling WebSocket reconnect attempt ${this.reconnectAttempts} in ${delay}ms`);
+    
+    setTimeout(() => {
+      this.connect().catch(error => {
+        console.error('WebSocket reconnect failed:', error);
+      });
+    }, delay);
+  }
+
+  private emit(event: string, data: any): void {
+    const listeners = this.eventListeners.get(event);
+    if (listeners) {
+      listeners.forEach(listener => {
+        try {
+          listener(data);
+        } catch (error) {
+          console.error(`Error in WebSocket event listener for ${event}:`, error);
+        }
+      });
+    }
+  }
+
+  on(event: string, listener: (data: any) => void): void {
+    if (!this.eventListeners.has(event)) {
+      this.eventListeners.set(event, new Set());
+    }
+    this.eventListeners.get(event)!.add(listener);
+  }
+
+  off(event: string, listener: (data: any) => void): void {
+    const listeners = this.eventListeners.get(event);
+    if (listeners) {
+      listeners.delete(listener);
+    }
+  }
+
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+}
+
+// Instancia de WebSocket
+const notificationWS = new NotificationWebSocket();
+
+// Función para retry con backoff exponencial
+const retryWithBackoff = async <T>(
+  operation: () => Promise<T>,
+  maxRetries: number = NOTIFICATION_CONFIG.maxRetries,
+  baseDelay: number = NOTIFICATION_CONFIG.retryDelay
+): Promise<T> => {
+  let lastError: any;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error: any) {
+      lastError = error;
+      
+      if (attempt === maxRetries) {
+        break;
+      }
+
+      // No reintentar en errores de autenticación
+      if (error.response?.status === 401 || error.response?.status === 403) {
+        break;
+      }
+
+      const jitter = Math.random() * 0.1 * baseDelay;
+      const delay = (baseDelay * Math.pow(2, attempt)) + jitter;
+      
+      console.warn(`Notification request failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${Math.round(delay)}ms:`, error.message);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+
+  throw lastError;
+};
+
+// Función para manejo de errores
+const handleNotificationError = (error: any, context: string) => {
+  console.error(`Notification Service Error (${context}):`, error);
+
+  if (error.response) {
+    const { status } = error.response;
+    switch (status) {
+      case 401:
+        throw new Error('Sesión expirada. Por favor, inicia sesión nuevamente.');
+      case 403:
+        throw new Error('No tienes permisos para acceder a las notificaciones.');
+      case 404:
+        throw new Error('Servicio de notificaciones no encontrado.');
+      case 429:
+        throw new Error('Demasiadas solicitudes. Intenta nuevamente en unos momentos.');
+      case 500:
+        throw new Error('Error interno del servidor de notificaciones.');
+      case 503:
+        throw new Error('Servicio de notificaciones no disponible temporalmente.');
+      default:
+        throw new Error(`Error de notificaciones: HTTP ${status}`);
+    }
+  }
+
+  if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+    throw new Error('No se puede conectar con el servicio de notificaciones.');
+  }
+
+  throw new Error('Error de conexión con el servicio de notificaciones.');
+};
+
+// Servicio principal de notificaciones
+export const notificationService = {
   /**
    * Inicializar el servicio de notificaciones
    */
   async initialize(): Promise<void> {
     try {
-      // Cargar notificaciones iniciales
-      await this.fetchNotifications();
-
-      // Iniciar WebSocket si está habilitado
-      if (this.config.enableWebSocket) {
-        this.connectWebSocket();
+      // Conectar WebSocket si está habilitado
+      if (NOTIFICATION_CONFIG.enableWebSocket) {
+        await notificationWS.connect();
       }
 
-      // Iniciar polling como fallback
-      this.startPolling();
+      // Configurar listeners de WebSocket
+      notificationWS.on('notification', (event: NotificationEvent) => {
+        this.handleRealtimeNotification(event);
+      });
 
       console.log('Notification service initialized');
     } catch (error) {
-      console.error('Failed to initialize notification service:', error);
-      // Continuar con polling aunque falle la inicialización
-      this.startPolling();
+      console.warn('Failed to initialize WebSocket, falling back to polling:', error);
     }
-  }
-
-  /**
-   * Conectar WebSocket para notificaciones en tiempo real
-   */
-  private connectWebSocket(): void {
-    if (this.websocket?.readyState === WebSocket.OPEN) {
-      return;
-    }
-
-    try {
-      const token = localStorage.getItem('accessToken');
-      const wsUrl = `${this.config.webSocketUrl}?token=${token}`;
-      
-      this.websocket = new WebSocket(wsUrl);
-
-      this.websocket.onopen = () => {
-        console.log('WebSocket connected for notifications');
-        // Reducir frecuencia de polling cuando WebSocket está activo
-        if (this.pollingTimer) {
-          this.stopPolling();
-          this.startPolling(this.config.pollingInterval * 2);
-        }
-      };
-
-      this.websocket.onmessage = (event) => {
-        try {
-          const notificationEvent: NotificationEvent = JSON.parse(event.data);
-          this.handleNotificationEvent(notificationEvent);
-        } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
-        }
-      };
-
-      this.websocket.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code, event.reason);
-        this.websocket = null;
-        
-        // Reconectar después de un delay si no fue intencional
-        if (event.code !== 1000) {
-          setTimeout(() => {
-            if (navigator.onLine) {
-              this.connectWebSocket();
-            }
-          }, 5000);
-        }
-
-        // Restaurar polling normal
-        if (this.pollingTimer) {
-          this.stopPolling();
-          this.startPolling();
-        }
-      };
-
-      this.websocket.onerror = (error) => {
-        console.error('WebSocket error:', error);
-      };
-
-    } catch (error) {
-      console.error('Failed to connect WebSocket:', error);
-    }
-  }
-
-  /**
-   * Desconectar WebSocket
-   */
-  private disconnectWebSocket(): void {
-    if (this.websocket) {
-      this.websocket.close(1000, 'Manual disconnect');
-      this.websocket = null;
-    }
-  }
-
-  /**
-   * Iniciar polling de notificaciones
-   */
-  private startPolling(interval: number = this.config.pollingInterval): void {
-    if (this.isPolling) {
-      return;
-    }
-
-    this.isPolling = true;
-    this.pollingTimer = setInterval(async () => {
-      try {
-        await this.fetchNotifications(true);
-      } catch (error) {
-        console.error('Polling error:', error);
-      }
-    }, interval);
-  }
-
-  /**
-   * Detener polling
-   */
-  private stopPolling(): void {
-    if (this.pollingTimer) {
-      clearInterval(this.pollingTimer);
-      this.pollingTimer = null;
-    }
-    this.isPolling = false;
-  }
-
-  /**
-   * Manejar eventos de notificación en tiempo real
-   */
-  private handleNotificationEvent(event: NotificationEvent): void {
-    const { type, notification } = event;
-
-    switch (type) {
-      case 'new':
-        this.cache.notifications.set(notification.id, notification);
-        if (notification.status === NotificationStatus.UNREAD) {
-          this.cache.unreadCount++;
-        }
-        break;
-
-      case 'updated':
-        const existing = this.cache.notifications.get(notification.id);
-        if (existing && existing.status === NotificationStatus.UNREAD && 
-            notification.status === NotificationStatus.READ) {
-          this.cache.unreadCount = Math.max(0, this.cache.unreadCount - 1);
-        }
-        this.cache.notifications.set(notification.id, notification);
-        break;
-
-      case 'deleted':
-        const deleted = this.cache.notifications.get(notification.id);
-        if (deleted?.status === NotificationStatus.UNREAD) {
-          this.cache.unreadCount = Math.max(0, this.cache.unreadCount - 1);
-        }
-        this.cache.notifications.delete(notification.id);
-        break;
-
-      case 'read':
-        const read = this.cache.notifications.get(notification.id);
-        if (read && read.status === NotificationStatus.UNREAD) {
-          read.status = NotificationStatus.READ;
-          this.cache.unreadCount = Math.max(0, this.cache.unreadCount - 1);
-        }
-        break;
-    }
-
-    // Notificar a los listeners
-    this.emitEvent(type, event);
-
-    // Limpiar cache si excede el tamaño máximo
-    if (this.cache.notifications.size > this.config.maxCacheSize) {
-      this.cleanupCache();
-    }
-  }
-
-  /**
-   * Limpiar cache manteniendo las notificaciones más recientes
-   */
-  private cleanupCache(): void {
-    const notifications = Array.from(this.cache.notifications.values())
-      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-      .slice(0, this.config.maxCacheSize * 0.8); // Mantener 80% del límite
-
-    this.cache.notifications.clear();
-    notifications.forEach(n => this.cache.notifications.set(n.id, n));
-  }
-
-  /**
-   * Obtener notificaciones del servidor
-   */
-  async fetchNotifications(silent: boolean = false): Promise<Notification[]> {
-    try {
-      const params: any = {
-        limit: 100,
-        includeRead: true
-      };
-
-      // Solo obtener notificaciones nuevas si tenemos cache
-      if (this.cache.lastFetch && silent) {
-        params.since = this.cache.lastFetch.toISOString();
-      }
-
-      const response = await apiClient.get<NotificationResponse>('/notifications', { params });
-      const { notifications, unreadCount } = response.data;
-
-      // Convertir strings de fecha a objetos Date
-      const processedNotifications = notifications.map(n => ({
-        ...n,
-        timestamp: new Date(n.timestamp)
-      }));
-
-      // Actualizar cache
-      if (!silent) {
-        this.cache.notifications.clear();
-      }
-
-      processedNotifications.forEach(n => {
-        this.cache.notifications.set(n.id, n);
-      });
-
-      this.cache.unreadCount = unreadCount;
-      this.cache.lastFetch = new Date();
-
-      return processedNotifications;
-
-    } catch (error: any) {
-      console.error('Failed to fetch notifications:', error);
-      
-      // Devolver cache si hay error de red
-      if (error.code === 'NETWORK_ERROR' && this.cache.notifications.size > 0) {
-        return Array.from(this.cache.notifications.values());
-      }
-      
-      throw error;
-    }
-  }
+  },
 
   /**
    * Obtener notificaciones con filtros
    */
-  async getNotifications(filters?: NotificationFilters): Promise<Notification[]> {
-    try {
-      const params: any = {};
+  async getNotifications(
+    filters?: NotificationFilters,
+    useCache: boolean = true
+  ): Promise<NotificationResponse> {
+    const cacheKey = `notifications-${JSON.stringify(filters || {})}`;
+    
+    // Intentar obtener desde cache primero
+    if (useCache) {
+      const cached = notificationCache.get<NotificationResponse>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
 
-      if (filters) {
-        if (filters.types?.length) {
+    try {
+      const operation = async () => {
+        const params: any = {
+          limit: 50,
+          offset: 0
+        };
+
+        // Aplicar filtros
+        if (filters?.types?.length) {
           params.types = filters.types.join(',');
         }
-        if (filters.priorities?.length) {
+        if (filters?.priorities?.length) {
           params.priorities = filters.priorities.join(',');
         }
-        if (filters.categories?.length) {
+        if (filters?.categories?.length) {
           params.categories = filters.categories.join(',');
         }
-        if (filters.status?.length) {
+        if (filters?.status?.length) {
           params.status = filters.status.join(',');
         }
-        if (filters.dateFrom) {
+        if (filters?.dateFrom) {
           params.dateFrom = filters.dateFrom.toISOString();
         }
-        if (filters.dateTo) {
+        if (filters?.dateTo) {
           params.dateTo = filters.dateTo.toISOString();
         }
-        if (filters.searchTerm) {
+        if (filters?.searchTerm) {
           params.search = filters.searchTerm;
         }
-      }
 
-      const response = await apiClient.get<NotificationResponse>('/notifications', { params });
-      
-      return response.data.notifications.map(n => ({
-        ...n,
-        timestamp: new Date(n.timestamp)
+        const response = await apiClient.get<NotificationResponse>('/notifications', {
+          params,
+          timeout: 10000
+        });
+
+        return response.data;
+      };
+
+      const result = await retryWithBackoff(operation);
+
+      // Procesar notificaciones
+      const processedNotifications = result.notifications.map(notification => ({
+        ...notification,
+        timestamp: new Date(notification.timestamp)
       }));
 
+      const processedResult = {
+        ...result,
+        notifications: processedNotifications
+      };
+
+      // Guardar en cache
+      notificationCache.set(cacheKey, processedResult, 60000); // 1 minuto
+
+      // Persistir localmente
+      persistence.saveNotifications(processedNotifications);
+
+      return processedResult;
+
     } catch (error: any) {
-      console.error('Failed to get filtered notifications:', error);
+      handleNotificationError(error, 'getNotifications');
+      
+      // Intentar devolver datos persistidos si hay error
+      const persistedNotifications = persistence.loadNotifications();
+      if (persistedNotifications.length > 0) {
+        console.warn('Returning persisted notifications due to error:', error.message);
+        return {
+          notifications: persistedNotifications,
+          totalCount: persistedNotifications.length,
+          unreadCount: persistedNotifications.filter(n => n.status === NotificationStatus.UNREAD).length,
+          hasMore: false
+        };
+      }
+      
       throw error;
     }
-  }
+  },
 
   /**
    * Marcar notificación como leída
    */
   async markAsRead(notificationId: string): Promise<void> {
     try {
-      await apiClient.patch(`/notifications/${notificationId}/read`);
-      
-      // Actualizar cache local
-      const notification = this.cache.notifications.get(notificationId);
-      if (notification && notification.status === NotificationStatus.UNREAD) {
-        notification.status = NotificationStatus.READ;
-        this.cache.unreadCount = Math.max(0, this.cache.unreadCount - 1);
-        
-        // Emitir evento
-        this.emitEvent('read', {
-          type: 'read',
-          notification,
-          timestamp: new Date()
+      const operation = async () => {
+        await apiClient.patch(`/notifications/${notificationId}/read`, {}, {
+          timeout: 5000
         });
-      }
+      };
+
+      await retryWithBackoff(operation);
+
+      // Limpiar cache relacionado
+      this.clearCache();
 
     } catch (error: any) {
-      console.error('Failed to mark notification as read:', error);
+      handleNotificationError(error, 'markAsRead');
       throw error;
     }
-  }
+  },
 
   /**
-   * Marcar todas las notificaciones como leídas
+   * Marcar múltiples notificaciones como leídas
    */
-  async markAllAsRead(): Promise<void> {
+  async markMultipleAsRead(notificationIds: string[]): Promise<void> {
     try {
-      await apiClient.patch('/notifications/read-all');
-      
-      // Actualizar cache local
-      this.cache.notifications.forEach(notification => {
-        if (notification.status === NotificationStatus.UNREAD) {
-          notification.status = NotificationStatus.READ;
-        }
-      });
-      
-      this.cache.unreadCount = 0;
+      const operation = async () => {
+        await apiClient.patch('/notifications/read-multiple', {
+          notificationIds
+        }, {
+          timeout: 10000
+        });
+      };
 
-      // Emitir evento
-      this.emitEvent('bulk_read', {
-        type: 'updated',
-        notification: {} as Notification, // Placeholder
-        timestamp: new Date()
-      });
+      await retryWithBackoff(operation);
+
+      // Limpiar cache relacionado
+      this.clearCache();
 
     } catch (error: any) {
-      console.error('Failed to mark all notifications as read:', error);
+      handleNotificationError(error, 'markMultipleAsRead');
       throw error;
     }
-  }
+  },
 
   /**
-   * Eliminar notificación
+   * Archivar notificación
    */
-  async deleteNotification(notificationId: string): Promise<void> {
+  async archiveNotification(notificationId: string): Promise<void> {
     try {
-      await apiClient.delete(`/notifications/${notificationId}`);
-      
-      // Actualizar cache local
-      const notification = this.cache.notifications.get(notificationId);
-      if (notification) {
-        if (notification.status === NotificationStatus.UNREAD) {
-          this.cache.unreadCount = Math.max(0, this.cache.unreadCount - 1);
-        }
-        this.cache.notifications.delete(notificationId);
-        
-        // Emitir evento
-        this.emitEvent('deleted', {
-          type: 'deleted',
-          notification,
-          timestamp: new Date()
+      const operation = async () => {
+        await apiClient.patch(`/notifications/${notificationId}/archive`, {}, {
+          timeout: 5000
         });
-      }
+      };
+
+      await retryWithBackoff(operation);
+
+      // Limpiar cache relacionado
+      this.clearCache();
 
     } catch (error: any) {
-      console.error('Failed to delete notification:', error);
+      handleNotificationError(error, 'archiveNotification');
       throw error;
     }
-  }
+  },
 
   /**
    * Obtener estadísticas de notificaciones
    */
-  async getStats(): Promise<NotificationStats> {
+  async getNotificationStats(useCache: boolean = true): Promise<NotificationStats> {
+    const cacheKey = 'notification-stats';
+    
+    if (useCache) {
+      const cached = notificationCache.get<NotificationStats>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
     try {
-      const response = await apiClient.get<NotificationStats>('/notifications/stats');
-      this.cache.stats = response.data;
-      return response.data;
+      const operation = async () => {
+        const response = await apiClient.get<NotificationStats>('/notifications/stats', {
+          timeout: 5000
+        });
+        return response.data;
+      };
+
+      const stats = await retryWithBackoff(operation);
+
+      // Guardar en cache
+      notificationCache.set(cacheKey, stats, 30000); // 30 segundos
+
+      return stats;
 
     } catch (error: any) {
-      console.error('Failed to get notification stats:', error);
-      
-      // Calcular estadísticas desde cache si hay error
-      if (this.cache.notifications.size > 0) {
-        const notifications = Array.from(this.cache.notifications.values());
-        const stats: NotificationStats = {
-          total: notifications.length,
-          unread: this.cache.unreadCount,
-          byType: {} as Record<NotificationType, number>,
-          byPriority: {} as Record<NotificationPriority, number>,
-          byCategory: {} as Record<NotificationCategory, number>,
-          todayCount: 0,
-          weekCount: 0,
-          monthCount: 0
-        };
-
-        const now = new Date();
-        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-        notifications.forEach(n => {
-          // Contar por tipo
-          stats.byType[n.type] = (stats.byType[n.type] || 0) + 1;
-          
-          // Contar por prioridad
-          stats.byPriority[n.priority] = (stats.byPriority[n.priority] || 0) + 1;
-          
-          // Contar por categoría
-          stats.byCategory[n.category] = (stats.byCategory[n.category] || 0) + 1;
-          
-          // Contar por período
-          if (n.timestamp >= today) stats.todayCount++;
-          if (n.timestamp >= weekAgo) stats.weekCount++;
-          if (n.timestamp >= monthAgo) stats.monthCount++;
-        });
-
-        return stats;
-      }
-      
+      handleNotificationError(error, 'getNotificationStats');
       throw error;
     }
-  }
+  },
 
   /**
    * Obtener configuración de notificaciones del usuario
    */
-  async getSettings(): Promise<NotificationSettings | null> {
+  async getNotificationSettings(): Promise<NotificationSettings | null> {
     try {
-      const response = await apiClient.get<NotificationSettings>('/notifications/settings');
-      return response.data;
+      const operation = async () => {
+        const response = await apiClient.get<NotificationSettings>('/notifications/settings', {
+          timeout: 5000
+        });
+        return response.data;
+      };
+
+      const settings = await retryWithBackoff(operation);
+      
+      // Persistir configuración
+      persistence.saveSettings(settings);
+
+      return {
+        ...settings,
+        updatedAt: new Date(settings.updatedAt)
+      };
+
     } catch (error: any) {
-      if (error.response?.status === 404) {
-        return null; // No hay configuración guardada
+      // Si hay error, intentar cargar desde persistencia
+      const persistedSettings = persistence.loadSettings();
+      if (persistedSettings) {
+        console.warn('Returning persisted notification settings due to error:', error.message);
+        return persistedSettings;
       }
-      console.error('Failed to get notification settings:', error);
+
+      handleNotificationError(error, 'getNotificationSettings');
       throw error;
     }
-  }
+  },
 
   /**
-   * Guardar configuración de notificaciones
+   * Actualizar configuración de notificaciones
    */
-  async saveSettings(settings: Partial<NotificationSettings>): Promise<NotificationSettings> {
+  async updateNotificationSettings(settings: Partial<NotificationSettings>): Promise<NotificationSettings> {
     try {
-      const response = await apiClient.post<NotificationSettings>('/notifications/settings', settings);
-      return response.data;
+      const operation = async () => {
+        const response = await apiClient.put<NotificationSettings>('/notifications/settings', settings, {
+          timeout: 10000
+        });
+        return response.data;
+      };
+
+      const updatedSettings = await retryWithBackoff(operation);
+
+      // Persistir nueva configuración
+      persistence.saveSettings(updatedSettings);
+
+      return {
+        ...updatedSettings,
+        updatedAt: new Date(updatedSettings.updatedAt)
+      };
+
     } catch (error: any) {
-      console.error('Failed to save notification settings:', error);
+      handleNotificationError(error, 'updateNotificationSettings');
       throw error;
     }
-  }
+  },
+
+  /**
+   * Manejar notificación en tiempo real
+   */
+  handleRealtimeNotification(event: NotificationEvent): void {
+    console.log('Received realtime notification:', event);
+
+    // Limpiar cache para forzar actualización
+    this.clearCache();
+
+    // Emitir evento personalizado para que los componentes puedan escuchar
+    const customEvent = new CustomEvent('notificationReceived', {
+      detail: event
+    });
+    window.dispatchEvent(customEvent);
+
+    // Actualizar persistencia local si es una nueva notificación
+    if (event.type === 'new') {
+      const persistedNotifications = persistence.loadNotifications();
+      const updatedNotifications = [event.notification, ...persistedNotifications];
+      persistence.saveNotifications(updatedNotifications);
+    }
+  },
+
+  /**
+   * Iniciar polling de notificaciones
+   */
+  startPolling(): void {
+    // Solo hacer polling si WebSocket no está conectado
+    if (notificationWS.isConnected()) {
+      return;
+    }
+
+    const poll = async () => {
+      try {
+        await this.getNotifications(undefined, false); // Sin cache para obtener datos frescos
+      } catch (error) {
+        console.warn('Polling error:', error);
+      }
+    };
+
+    // Polling inicial
+    poll();
+
+    // Configurar intervalo de polling
+    setInterval(poll, NOTIFICATION_CONFIG.pollingInterval);
+  },
+
+  /**
+   * Detener el servicio
+   */
+  stop(): void {
+    notificationWS.disconnect();
+  },
+
+  /**
+   * Limpiar cache
+   */
+  clearCache(): void {
+    notificationCache.clear();
+  },
+
+  /**
+   * Limpiar persistencia local
+   */
+  clearPersistence(): void {
+    persistence.clearAll();
+  },
+
+  /**
+   * Obtener estado de salud del servicio
+   */
+  async getHealthStatus(): Promise<{
+    isHealthy: boolean;
+    services: {
+      api: { status: 'up' | 'down'; responseTime?: number; error?: string };
+      websocket: { status: 'up' | 'down'; connected: boolean };
+      cache: { status: 'up' | 'down'; entries: number };
+      persistence: { status: 'up' | 'down'; notifications: number };
+    };
+    timestamp: Date;
+  }> {
+    const timestamp = new Date();
+    const healthStatus = {
+      isHealthy: true,
+      services: {
+        api: { status: 'up' as 'up' | 'down', responseTime: undefined as number | undefined, error: undefined as string | undefined },
+        websocket: { status: notificationWS.isConnected() ? 'up' as 'up' | 'down' : 'down' as 'up' | 'down', connected: notificationWS.isConnected() },
+        cache: { status: 'up' as 'up' | 'down', entries: notificationCache.getStats().size },
+        persistence: { status: 'up' as 'up' | 'down', notifications: persistence.loadNotifications().length }
+      },
+      timestamp
+    };
+
+    // Verificar API
+    try {
+      const startTime = Date.now();
+      await apiClient.get('/notifications/health', { timeout: 5000 });
+      healthStatus.services.api = {
+        status: 'up',
+        responseTime: Date.now() - startTime,
+        error: undefined
+      };
+    } catch (error: any) {
+      healthStatus.services.api = {
+        status: 'down',
+        responseTime: undefined,
+        error: error.message
+      };
+      healthStatus.isHealthy = false;
+    }
+
+    return healthStatus;
+  },
+
+  /**
+   * Obtener estadísticas del servicio
+   */
+  getServiceStats(): {
+    cache: { size: number; keys: string[] };
+    persistence: { notifications: number };
+    websocket: { connected: boolean };
+    config: NotificationServiceConfig;
+  } {
+    return {
+      cache: notificationCache.getStats(),
+      persistence: { notifications: persistence.loadNotifications().length },
+      websocket: { connected: notificationWS.isConnected() },
+      config: NOTIFICATION_CONFIG
+    };
+  },
+
+  /**
+   * Suscribirse a eventos de notificaciones en tiempo real
+   */
+  onNotification(callback: (event: NotificationEvent) => void): () => void {
+    notificationWS.on('notification', callback);
+    
+    // Retornar función para desuscribirse
+    return () => {
+      notificationWS.off('notification', callback);
+    };
+  },
+
+  /**
+   * Suscribirse a eventos de conexión WebSocket
+   */
+  onConnectionChange(callback: (connected: boolean) => void): () => void {
+    const connectedHandler = () => callback(true);
+    const disconnectedHandler = () => callback(false);
+    
+    notificationWS.on('connected', connectedHandler);
+    notificationWS.on('disconnected', disconnectedHandler);
+    
+    return () => {
+      notificationWS.off('connected', connectedHandler);
+      notificationWS.off('disconnected', disconnectedHandler);
+    };
+  },
+
+  /**
+   * Obtener notificaciones en caché
+   */
+  getCachedNotifications(): Notification[] {
+    return persistence.loadNotifications();
+  },
 
   /**
    * Obtener conteo de notificaciones no leídas
    */
   getUnreadCount(): number {
-    return this.cache.unreadCount;
-  }
+    const notifications = persistence.loadNotifications();
+    return notifications.filter(n => n.status === NotificationStatus.UNREAD).length;
+  },
 
   /**
-   * Obtener notificaciones desde cache
-   */
-  getCachedNotifications(): Notification[] {
-    return Array.from(this.cache.notifications.values())
-      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
-  }
-
-  /**
-   * Suscribirse a eventos de notificaciones
-   */
-  addEventListener(eventType: string, callback: (event: NotificationEvent) => void): void {
-    if (!this.eventListeners.has(eventType)) {
-      this.eventListeners.set(eventType, []);
-    }
-    this.eventListeners.get(eventType)!.push(callback);
-  }
-
-  /**
-   * Desuscribirse de eventos
-   */
-  removeEventListener(eventType: string, callback: (event: NotificationEvent) => void): void {
-    const listeners = this.eventListeners.get(eventType);
-    if (listeners) {
-      const index = listeners.indexOf(callback);
-      if (index > -1) {
-        listeners.splice(index, 1);
-      }
-    }
-  }
-
-  /**
-   * Emitir evento a los listeners
-   */
-  private emitEvent(eventType: string, event: NotificationEvent): void {
-    const listeners = this.eventListeners.get(eventType) || [];
-    listeners.forEach(callback => {
-      try {
-        callback(event);
-      } catch (error) {
-        console.error('Error in notification event listener:', error);
-      }
-    });
-  }
-
-  /**
-   * Limpiar recursos
+   * Limpiar recursos del servicio
    */
   cleanup(): void {
-    this.stopPolling();
-    this.disconnectWebSocket();
-    this.eventListeners.clear();
-    this.cache.notifications.clear();
-  }
-}
-
-// Instancia singleton del servicio
-let notificationManager: NotificationManager | null = null;
-
-export const notificationService = {
-  /**
-   * Inicializar el servicio de notificaciones
-   */
-  async initialize(config?: Partial<NotificationServiceConfig>): Promise<void> {
-    if (!notificationManager) {
-      notificationManager = new NotificationManager(config);
-    }
-    await notificationManager.initialize();
+    notificationWS.disconnect();
+    notificationCache.clear();
   },
 
   /**
-   * Obtener notificaciones
+   * Agregar listener de eventos
    */
-  async getNotifications(filters?: NotificationFilters): Promise<Notification[]> {
-    if (!notificationManager) {
-      throw new Error('Notification service not initialized');
-    }
-    return notificationManager.getNotifications(filters);
+  addEventListener(event: string, listener: (data: any) => void): void {
+    notificationWS.on(event, listener);
   },
 
   /**
-   * Marcar como leída
+   * Remover listener de eventos
    */
-  async markAsRead(notificationId: string): Promise<void> {
-    if (!notificationManager) {
-      throw new Error('Notification service not initialized');
-    }
-    return notificationManager.markAsRead(notificationId);
-  },
-
-  /**
-   * Marcar todas como leídas
-   */
-  async markAllAsRead(): Promise<void> {
-    if (!notificationManager) {
-      throw new Error('Notification service not initialized');
-    }
-    return notificationManager.markAllAsRead();
-  },
-
-  /**
-   * Eliminar notificación
-   */
-  async deleteNotification(notificationId: string): Promise<void> {
-    if (!notificationManager) {
-      throw new Error('Notification service not initialized');
-    }
-    return notificationManager.deleteNotification(notificationId);
-  },
-
-  /**
-   * Obtener estadísticas
-   */
-  async getStats(): Promise<NotificationStats> {
-    if (!notificationManager) {
-      throw new Error('Notification service not initialized');
-    }
-    return notificationManager.getStats();
-  },
-
-  /**
-   * Obtener configuración
-   */
-  async getSettings(): Promise<NotificationSettings | null> {
-    if (!notificationManager) {
-      throw new Error('Notification service not initialized');
-    }
-    return notificationManager.getSettings();
-  },
-
-  /**
-   * Guardar configuración
-   */
-  async saveSettings(settings: Partial<NotificationSettings>): Promise<NotificationSettings> {
-    if (!notificationManager) {
-      throw new Error('Notification service not initialized');
-    }
-    return notificationManager.saveSettings(settings);
-  },
-
-  /**
-   * Obtener conteo no leídas
-   */
-  getUnreadCount(): number {
-    return notificationManager?.getUnreadCount() || 0;
-  },
-
-  /**
-   * Obtener notificaciones en cache
-   */
-  getCachedNotifications(): Notification[] {
-    return notificationManager?.getCachedNotifications() || [];
-  },
-
-  /**
-   * Suscribirse a eventos
-   */
-  addEventListener(eventType: string, callback: (event: NotificationEvent) => void): void {
-    if (!notificationManager) {
-      throw new Error('Notification service not initialized');
-    }
-    notificationManager.addEventListener(eventType, callback);
-  },
-
-  /**
-   * Desuscribirse de eventos
-   */
-  removeEventListener(eventType: string, callback: (event: NotificationEvent) => void): void {
-    if (!notificationManager) {
-      return;
-    }
-    notificationManager.removeEventListener(eventType, callback);
-  },
-
-  /**
-   * Limpiar servicio
-   */
-  cleanup(): void {
-    if (notificationManager) {
-      notificationManager.cleanup();
-      notificationManager = null;
-    }
+  removeEventListener(event: string, listener: (data: any) => void): void {
+    notificationWS.off(event, listener);
   }
 };
 
-// Exportar configuración por defecto
-export { DEFAULT_CONFIG as NOTIFICATION_CONFIG };
+// Exportar configuración y utilidades
+export const NOTIFICATION_UTILS = {
+  cache: notificationCache,
+  persistence,
+  websocket: notificationWS,
+  config: NOTIFICATION_CONFIG
+};
+
+// Inicializar automáticamente cuando se importa el módulo
+if (typeof window !== 'undefined') {
+  // Solo en el navegador, no en SSR
+  notificationService.initialize().catch(error => {
+    console.warn('Failed to auto-initialize notification service:', error);
+  });
+}

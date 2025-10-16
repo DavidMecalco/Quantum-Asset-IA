@@ -15,6 +15,8 @@ const MAXIMO_CONFIG = {
   retryAttempts: 3,
   retryDelay: 2000,
   healthCheckInterval: 60000, // 1 minuto
+  maxConcurrentRequests: 5,
+  rateLimitDelay: 100, // ms entre requests para evitar rate limiting
 };
 
 // Tipos específicos para respuestas de Maximo
@@ -146,7 +148,33 @@ const handleMaximoError = (error: any, context: string) => {
   throw new Error('Error de conexión con Maximo. Intenta nuevamente.');
 };
 
-// Función para retry con backoff exponencial
+// Control de concurrencia para requests
+let activeRequests = 0;
+const requestQueue: Array<() => void> = [];
+
+const waitForSlot = (): Promise<void> => {
+  return new Promise((resolve) => {
+    if (activeRequests < MAXIMO_CONFIG.maxConcurrentRequests) {
+      activeRequests++;
+      resolve();
+    } else {
+      requestQueue.push(() => {
+        activeRequests++;
+        resolve();
+      });
+    }
+  });
+};
+
+const releaseSlot = () => {
+  activeRequests--;
+  if (requestQueue.length > 0) {
+    const next = requestQueue.shift();
+    if (next) next();
+  }
+};
+
+// Función para retry con backoff exponencial y control de concurrencia
 const retryWithBackoff = async <T>(
   operation: () => Promise<T>,
   maxRetries: number = MAXIMO_CONFIG.retryAttempts,
@@ -156,8 +184,17 @@ const retryWithBackoff = async <T>(
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await operation();
+      // Esperar slot disponible para evitar sobrecarga
+      await waitForSlot();
+      
+      try {
+        const result = await operation();
+        return result;
+      } finally {
+        releaseSlot();
+      }
     } catch (error: any) {
+      releaseSlot();
       lastError = error;
       
       if (attempt === maxRetries) {
@@ -169,7 +206,16 @@ const retryWithBackoff = async <T>(
         break;
       }
 
-      const delay = baseDelay * Math.pow(2, attempt);
+      // No reintentar en errores de validación (400)
+      if (error.response?.status === 400) {
+        break;
+      }
+
+      // Calcular delay con jitter para evitar thundering herd
+      const jitter = Math.random() * 0.1 * baseDelay;
+      const delay = (baseDelay * Math.pow(2, attempt)) + jitter;
+      
+      console.warn(`Maximo request failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${Math.round(delay)}ms:`, error.message);
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
@@ -177,15 +223,80 @@ const retryWithBackoff = async <T>(
   throw lastError;
 };
 
+// Cache para mejorar performance
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+  ttl: number;
+}
+
+class MaximoCache {
+  private cache = new Map<string, CacheEntry<any>>();
+  private readonly DEFAULT_TTL = 30000; // 30 segundos
+
+  set<T>(key: string, data: T, ttl: number = this.DEFAULT_TTL): void {
+    this.cache.set(key, {
+      data,
+      timestamp: Date.now(),
+      ttl
+    });
+  }
+
+  get<T>(key: string): T | null {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this.cache.delete(key);
+      return null;
+    }
+
+    return entry.data as T;
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  has(key: string): boolean {
+    const entry = this.cache.get(key);
+    if (!entry) return false;
+    
+    if (Date.now() - entry.timestamp > entry.ttl) {
+      this.cache.delete(key);
+      return false;
+    }
+    
+    return true;
+  }
+}
+
+const maximoCache = new MaximoCache();
+
 export const maximoService = {
   /**
    * Obtener estado del sistema Maximo
    */
-  async getSystemStatus(): Promise<SystemStatus> {
+  async getSystemStatus(useCache: boolean = true): Promise<SystemStatus> {
+    const cacheKey = 'system-status';
+    
+    // Intentar obtener desde cache primero
+    if (useCache) {
+      const cached = maximoCache.get<SystemStatus>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
     try {
       const operation = async () => {
         const response = await apiClient.get<MaximoSystemInfo>('/maximo/system/info', {
-          timeout: MAXIMO_CONFIG.timeout
+          timeout: MAXIMO_CONFIG.timeout,
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+          }
         });
         return response.data;
       };
@@ -200,7 +311,7 @@ export const maximoService = {
         performance = SystemPerformance.WARNING;
       }
 
-      return {
+      const status: SystemStatus = {
         isConnected: true,
         lastSync: new Date(),
         performance,
@@ -209,23 +320,45 @@ export const maximoService = {
         version: systemInfo.version,
         uptime: systemInfo.uptime || 0
       };
+
+      // Guardar en cache
+      maximoCache.set(cacheKey, status, 15000); // Cache por 15 segundos
+
+      return status;
     } catch (error: any) {
+      handleMaximoError(error, 'getSystemStatus');
+      
       // Si no podemos conectar, devolver estado desconectado
       console.warn('Maximo connection failed:', error);
-      return {
+      const disconnectedStatus: SystemStatus = {
         isConnected: false,
         lastSync: new Date(),
         performance: SystemPerformance.CRITICAL,
         activeUsers: 0,
         systemLoad: 0
       };
+
+      // Cache el estado desconectado por menos tiempo
+      maximoCache.set(cacheKey, disconnectedStatus, 5000); // 5 segundos
+      
+      return disconnectedStatus;
     }
   },
 
   /**
    * Obtener work orders del usuario desde Maximo
    */
-  async getUserWorkOrders(filters?: TaskFilters): Promise<Task[]> {
+  async getUserWorkOrders(filters?: TaskFilters, useCache: boolean = true): Promise<Task[]> {
+    const cacheKey = `work-orders-${JSON.stringify(filters || {})}`;
+    
+    // Intentar obtener desde cache primero
+    if (useCache) {
+      const cached = maximoCache.get<Task[]>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
     try {
       const operation = async () => {
         // Construir query parameters para Maximo
@@ -275,7 +408,13 @@ export const maximoService = {
 
         const response = await apiClient.get<MaximoApiResponse<MaximoWorkOrder>>('/maximo/os/mxwo', {
           params,
-          timeout: MAXIMO_CONFIG.timeout
+          timeout: MAXIMO_CONFIG.timeout,
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Cache-Control': 'no-cache'
+          }
         });
 
         return response.data;
@@ -288,10 +427,23 @@ export const maximoService = {
       }
 
       const workOrders = maximoResponse.member || [];
-      return workOrders.map(convertMaximoWorkOrderToTask);
+      const tasks = workOrders.map(convertMaximoWorkOrderToTask);
+
+      // Guardar en cache
+      maximoCache.set(cacheKey, tasks, 30000); // Cache por 30 segundos
+
+      return tasks;
 
     } catch (error: any) {
       handleMaximoError(error, 'getUserWorkOrders');
+      
+      // Intentar devolver datos en cache si hay error
+      const cached = maximoCache.get<Task[]>(cacheKey);
+      if (cached) {
+        console.warn('Returning cached work orders due to error:', error.message);
+        return cached;
+      }
+      
       throw error;
     }
   },
@@ -299,15 +451,33 @@ export const maximoService = {
   /**
    * Obtener métricas del sistema Maximo
    */
-  async getSystemMetrics(): Promise<SystemMetrics> {
+  async getSystemMetrics(useCache: boolean = true): Promise<SystemMetrics> {
+    const cacheKey = 'system-metrics';
+    
+    // Intentar obtener desde cache primero
+    if (useCache) {
+      const cached = maximoCache.get<SystemMetrics>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+    }
+
     try {
       const operation = async () => {
         const [systemInfo, dbMetrics] = await Promise.all([
           apiClient.get<MaximoSystemInfo>('/maximo/system/info', {
-            timeout: MAXIMO_CONFIG.timeout
+            timeout: MAXIMO_CONFIG.timeout,
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            }
           }),
           apiClient.get<any>('/maximo/system/metrics', {
-            timeout: MAXIMO_CONFIG.timeout
+            timeout: MAXIMO_CONFIG.timeout,
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            }
           }).catch(() => ({ data: {} })) // Fallback si no está disponible
         ]);
 
@@ -319,7 +489,7 @@ export const maximoService = {
 
       const { systemInfo, dbMetrics } = await retryWithBackoff(operation);
 
-      return {
+      const metrics: SystemMetrics = {
         cpuUsage: dbMetrics.cpuUsage || systemInfo.systemLoad || 0,
         memoryUsage: dbMetrics.memoryUsage || 0,
         diskUsage: dbMetrics.diskUsage || 0,
@@ -331,8 +501,21 @@ export const maximoService = {
         timestamp: new Date()
       };
 
+      // Guardar en cache
+      maximoCache.set(cacheKey, metrics, 20000); // Cache por 20 segundos
+
+      return metrics;
+
     } catch (error: any) {
       handleMaximoError(error, 'getSystemMetrics');
+      
+      // Intentar devolver datos en cache si hay error
+      const cached = maximoCache.get<SystemMetrics>(cacheKey);
+      if (cached) {
+        console.warn('Returning cached metrics due to error:', error.message);
+        return cached;
+      }
+      
       throw error;
     }
   },
@@ -547,6 +730,70 @@ export const maximoService = {
         };
       }
     }
+  },
+
+  /**
+   * Limpiar cache del servicio
+   */
+  clearCache(): void {
+    maximoCache.clear();
+  },
+
+  /**
+   * Obtener información de salud del servicio
+   */
+  async getHealthStatus(): Promise<{
+    isHealthy: boolean;
+    services: {
+      maximo: { status: 'up' | 'down'; responseTime?: number; error?: string };
+      cache: { status: 'up' | 'down'; entries: number };
+    };
+    timestamp: Date;
+  }> {
+    const timestamp = new Date();
+    const healthStatus = {
+      isHealthy: true,
+      services: {
+        maximo: { status: 'up' as 'up' | 'down', responseTime: undefined as number | undefined, error: undefined as string | undefined },
+        cache: { status: 'up' as 'up' | 'down', entries: maximoCache['cache'].size }
+      },
+      timestamp
+    };
+
+    try {
+      const connectivity = await this.checkConnectivity();
+      healthStatus.services.maximo = {
+        status: connectivity.isConnected ? 'up' : 'down',
+        responseTime: connectivity.responseTime,
+        error: connectivity.error
+      };
+      
+      if (!connectivity.isConnected) {
+        healthStatus.isHealthy = false;
+      }
+    } catch (error: any) {
+      healthStatus.services.maximo = {
+        status: 'down',
+        responseTime: undefined,
+        error: error.message
+      };
+      healthStatus.isHealthy = false;
+    }
+
+    return healthStatus;
+  },
+
+  /**
+   * Obtener estadísticas del cache
+   */
+  getCacheStats(): {
+    size: number;
+    keys: string[];
+  } {
+    return {
+      size: maximoCache['cache'].size,
+      keys: Array.from(maximoCache['cache'].keys())
+    };
   }
 };
 
@@ -555,5 +802,6 @@ export const MAXIMO_UTILS = {
   mapMaximoPriority,
   mapMaximoStatus,
   convertMaximoWorkOrderToTask,
-  MAXIMO_CONFIG
+  MAXIMO_CONFIG,
+  cache: maximoCache
 };

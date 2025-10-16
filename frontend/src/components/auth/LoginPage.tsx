@@ -20,7 +20,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ redirectTo }) => {
   const messageParam = searchParams.get('message');
 
   // Determinar la URL de redirección
-  const finalRedirectTo = redirectTo || redirectParam || '/dashboard';
+  const finalRedirectTo = redirectTo || redirectParam || '/home';
 
   // Mostrar loading si está verificando autenticación
   if (isLoading) {

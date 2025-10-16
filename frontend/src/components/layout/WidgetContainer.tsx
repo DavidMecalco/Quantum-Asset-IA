@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { WidgetState, WidgetSize } from '../../types/widgets';
 import { RefreshCw, Settings, X, Maximize2, Minimize2, AlertCircle } from 'lucide-react';
 
@@ -95,6 +95,8 @@ export const WidgetContainer: React.FC<WidgetContainerProps> = ({
   const [isHovered, setIsHovered] = useState(false);
   const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(!!refreshInterval);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [isFocused, setIsFocused] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   // Auto-refresh si está habilitado
   useEffect(() => {
@@ -125,6 +127,62 @@ export const WidgetContainer: React.FC<WidgetContainerProps> = ({
     const nextIndex = (currentIndex + 1) % sizes.length;
     onResize(sizes[nextIndex]);
   }, [widget.size, onResize]);
+
+  // Manejar navegación por teclado
+  const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
+    // Solo procesar si el widget está enfocado
+    if (!isFocused) return;
+
+    switch (event.key) {
+      case 'r':
+      case 'R':
+        if (onRefresh) {
+          event.preventDefault();
+          handleRefresh();
+        }
+        break;
+      case 's':
+      case 'S':
+        if (onSettings) {
+          event.preventDefault();
+          onSettings();
+        }
+        break;
+      case 'Delete':
+      case 'Backspace':
+        if (onRemove) {
+          event.preventDefault();
+          onRemove();
+        }
+        break;
+      case '+':
+      case '=':
+        if (onResize && widget.size !== WidgetSize.LARGE) {
+          event.preventDefault();
+          const sizes = [WidgetSize.SMALL, WidgetSize.MEDIUM, WidgetSize.LARGE];
+          const currentIndex = sizes.indexOf(widget.size);
+          onResize(sizes[currentIndex + 1]);
+        }
+        break;
+      case '-':
+        if (onResize && widget.size !== WidgetSize.SMALL) {
+          event.preventDefault();
+          const sizes = [WidgetSize.SMALL, WidgetSize.MEDIUM, WidgetSize.LARGE];
+          const currentIndex = sizes.indexOf(widget.size);
+          onResize(sizes[currentIndex - 1]);
+        }
+        break;
+      case 'Enter':
+      case ' ':
+        // Activar el primer elemento interactivo dentro del widget
+        event.preventDefault();
+        const firstButton = containerRef.current?.querySelector('button:not([disabled])') as HTMLElement;
+        if (firstButton) {
+          firstButton.focus();
+        }
+        break;
+    }
+  }, [isFocused, onRefresh, onSettings, onRemove, onResize, widget.size, handleRefresh]);
 
   // Obtener clases CSS según el tamaño
   const getSizeClasses = (): string => {
@@ -164,11 +222,19 @@ export const WidgetContainer: React.FC<WidgetContainerProps> = ({
 
   return (
     <div
+      ref={containerRef}
       className={baseClasses}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
+      onFocus={() => setIsFocused(true)}
+      onBlur={() => setIsFocused(false)}
+      onKeyDown={handleKeyDown}
       data-widget-id={widget.id}
       data-widget-type={widget.type}
+      tabIndex={0}
+      role="region"
+      aria-label={`Widget ${title || widget.type}. Presiona R para actualizar, S para configuración, Enter para interactuar`}
+      aria-describedby={`widget-${widget.id}-description`}
     >
       {/* Header del widget */}
       {(title || showControls) && (
@@ -285,6 +351,17 @@ export const WidgetContainer: React.FC<WidgetContainerProps> = ({
         ) : (
           children
         )}
+      </div>
+
+      {/* Descripción oculta para screen readers */}
+      <div 
+        id={`widget-${widget.id}-description`} 
+        className="sr-only"
+      >
+        Widget {title || widget.type}. 
+        {widget.isLoading && 'Cargando contenido. '}
+        {widget.error && `Error: ${widget.error}. `}
+        Atajos de teclado: R para actualizar, S para configuración, + y - para cambiar tamaño, Delete para remover.
       </div>
 
       {/* Footer con información adicional */}
