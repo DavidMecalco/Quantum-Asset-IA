@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Mail, CheckCircle, Shield, Clock } from 'lucide-react';
+import { Mail, Lock, CheckCircle, Shield, Clock } from 'lucide-react';
 import { LoginFormProps, LoginFormState, LoginCredentials } from '../../types/auth';
 import { useAuth, useAuthError } from '../../hooks/auth/useAuth';
 import { ValidatedInput } from '../ui/ValidatedInput';
