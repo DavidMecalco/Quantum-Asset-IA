@@ -2,6 +2,34 @@
 
 Portal web de integración con IBM Maximo Application Suite potenciado por Watson X AI.
 
+<img width="5152" height="2620" alt="_C__Users_Dreiv_Downloads_index html (1)" src="https://github.com/user-attachments/assets/aad66b45-5a28-4b12-a78e-d61c600b1d1f" />
+
+
+**Portal completo para integración de datos, análisis avanzado y asistente de IA conversacional con IBM Maximo**
+
+[![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
+[![React](https://img.shields.io/badge/React-18.0-blue.svg)](https://reactjs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0-blue.svg)](https://www.typescriptlang.org/)
+[![Watson X](https://img.shields.io/badge/Watson%20X-AI-orange.svg)](https://www.ibm.com/watsonx)
+[![Maximo](https://img.shields.io/badge/IBM-Maximo-green.svg)](https://www.ibm.com/products/maximo)
+
+</div>
+
+## 📋 Descripción
+
+**Quantum Asset** es una plataforma avanzada de integración que conecta IBM Maximo con Watson X AI, proporcionando una experiencia conversacional moderna para la gestión de activos empresariales. Combina análisis predictivo, visualizaciones interactivas y un asistente de IA conversacional en una interfaz web elegante.
+
+### ✨ Características Principales
+
+- **🤖 Asistente Watson X AI**: Chat conversacional con IA para consultas en lenguaje natural
+- **📊 Dashboards Interactivos**: Visualización de KPIs y métricas en tiempo real
+- **⚡ Integración Maximo**: Conexión directa con IBM Maximo MAS via REST API
+- **📈 Analytics Avanzados**: Análisis predictivo y generación de insights automáticos
+- **🎨 UI Moderna**: Interfaz glassmorphic con Tailwind CSS y animaciones fluidas
+- **📱 Responsive Design**: Adaptado para desktop, tablet y móvil
+
+## 🏗️ Arquitectura del Sistema
+
 ## Estructura del Proyecto
 
 ```
@@ -185,3 +213,9 @@ backend/src/
 ## Soporte
 
 Para problemas o preguntas sobre el desarrollo, consultar la documentación del proyecto o contactar al equipo de desarrollo.
+
+## Contacto
+
+- **Desarrollador**: [David Mecalco](mailto:davidmecalcodeveloper@gmail.com)
+- **Proyecto**: [GitHub Repository](https://github.com/DavidMecalco/Quantum-Asset-IA)
+- **Documentación**: [Wiki del Proyecto](https://github.com/DavidMecalco/Quantum-Asset-IA/wiki)
